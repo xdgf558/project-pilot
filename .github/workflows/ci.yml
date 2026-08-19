@@ -98,7 +98,6 @@ jobs:
           shopt -s nullglob
           rm -f test-results*.xml
           swift test --xunit-output test-results.xml 2>&1 | tee test.log
-          rm -f test-results*.xml  # 临时探针:模拟上游不再产出 XML。下一提交删除。
 
           # SwiftPM 不会把 Swift Testing 的结果写进你指定的那个文件名 ——
           # 它写到 <去掉扩展名>-swift-testing.xml。指定路径本身只在 --parallel
