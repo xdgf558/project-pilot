@@ -38,8 +38,12 @@ playground.xcworkspace
 # ── Swift Package Manager ──────────────────────────────────────────────
 .build/
 .swiftpm/
-Packages/
-Package.resolved
+# 这里刻意不写 Packages/ —— 那是 Swift 3 时代 SPM 的检出目录,现代 SPM
+# 不再使用(检出在 .build/ 里)。若将来把本地子 package 放进 Packages/,
+# 忽略它会静默漏提交源码。宁可多一次 git status 噪音。
+#
+# Package.resolved 必须提交 —— v0.2 §11 规则 8:不使用 latest 浮动版本,
+# 依赖版本要能精确复现和回滚。
 
 # ── 依赖管理(如果将来用到)────────────────────────────────────────────
 Pods/
