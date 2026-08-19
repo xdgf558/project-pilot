@@ -8,7 +8,9 @@
 编码 agent(Codex CLI / Claude Code)去做,盯着它们走完「开 PR → 审查 → 合并 → 标完成」,
 GitHub 是唯一权威来源。
 
-**当前状态:规划阶段,尚未开工。** 这个仓库目前只有工程骨架。
+**当前状态:Phase 0 工程基础,接近完成。**
+还没有界面,也还没有数据层 —— 现在仓库里的是工程骨架、
+自动强制的模块边界、CI,以及给 AI 执行器看的规则源。
 
 ---
 
@@ -62,6 +64,60 @@ GitHub 是唯一权威来源。
 不扫描未授权目录、仓库必须经用户信任确认、外部命令只用解析验证过的绝对路径、
 **禁止拼接 shell 命令字符串**。
 
+## 仓库结构
+
+    Package.swift            SPM 包,swift-tools-version 6.0
+    Sources/
+      PilotCore/             纯逻辑层。零 IO,不认识外部世界
+      PilotInfrastructure/   通往外部世界的唯一通道
+      PilotTestSupport/      测试替身。不是 product,产品 target 不得依赖
+      pilotctl/              命令行宿主
+    Tests/
+    Scripts/                 边界检查、规则生成,以及它们各自的测试
+    Docs/
+      DECISIONS.md           架构决策记录
+      EXECUTOR_RULES.md      执行器规则的权威源
+    AGENTS.md  CLAUDE.md     由 EXECUTOR_RULES.md 生成,勿直接编辑
+
+**没有 `.xcodeproj`。** 界面要到 Phase 8 才需要,届时以独立 Xcode 工程链接本 package。
+这么选是因为本项目的核心卖点是多个执行器**并行**改代码,而 `project.pbxproj`
+是出了名的难合文件 —— 自己的工具不该被自己的工程结构卡住。
+理由和回退条件见 ADR-0002。
+
+分层不靠自觉。`PilotCore` 里出现 `Process`、`FileManager`、任何 UI 框架,
+或者产品 target 依赖了 `PilotTestSupport`,CI 会直接红。
+
+## 上手
+
+```bash
+swift build
+swift test
+```
+
+CI 跑的是下面六条,推送前本地先跑一遍能省一个来回:
+
+```bash
+swift build -Xswiftc -warnings-as-errors
+swift test
+Scripts/check-module-boundaries.sh
+Scripts/test-check-module-boundaries.sh
+Scripts/generate-executor-rules.sh --check
+Scripts/test-generate-executor-rules.sh
+```
+
+新增了 test target 之后要先 `rm -rf .build`,否则 SPM 不会重建测试 bundle,
+新套件会**静默不跑**。
+
+需要 Xcode 26.6 / Swift 6.3。CI 锁的是同一个 Xcode build(17F113),
+所以本地和 CI 之间不存在工具链差异。
+
+## 两份值得先读的文档
+
+| | |
+|---|---|
+| [`Docs/DECISIONS.md`](Docs/DECISIONS.md) | 每条架构决策的理由、**代价**和回退条件。有些看起来该做的事已经被明确否决过 |
+| [`Docs/EXECUTOR_RULES.md`](Docs/EXECUTOR_RULES.md) | AI 执行器开工前必读的规则。`AGENTS.md` 与 `CLAUDE.md` 由它生成,CI 挡住两者漂移 |
+
 ## 外部依赖
 
 依赖四个外部 CLI,它们各自独立演进:
@@ -80,7 +136,7 @@ GitHub 是唯一权威来源。
 ## 路线图(M-Solo 自用版)
 
 ```
-第一步  工程骨架 + 数据层          不碰外部世界
+第一步  工程骨架 + 数据层          不碰外部世界      ← 现在在这里
 第二步  命令安全 + 契约测试        上游变化的预警机制
 第三步  worktree 隔离              现有实现最痛的缺口
 第四步  GitHub 同步 + 合并安全
