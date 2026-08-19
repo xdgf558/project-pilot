@@ -30,7 +30,12 @@ status=${PIPESTATUS[0]}
 # 彻底不产出则断言会红。两种变化都可见。
 xml=("$PREFIX"*.xml)
 if [ ${#xml[@]} -eq 0 ]; then
-    echo "::error::$CONFIGURATION 配置未生成任何 xunit XML。上游行为可能已变更,见 ADR-0003。"
+    # 「没有产物」有两种原因,报错时必须分清 —— 指着错误的方向排查最费时间。
+    if [ "$status" -ne 0 ]; then
+        echo "::error::$CONFIGURATION 配置的 swift test 失败(退出码 $status),因此没有测试结果产物。具体原因见上方日志,多半是编译没过。"
+    else
+        echo "::error::$CONFIGURATION 配置的 swift test 成功了,却没有生成任何 xunit XML。这是上游行为变更的信号,见 ADR-0003。"
+    fi
     exit 1
 fi
 
