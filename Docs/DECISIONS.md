@@ -183,3 +183,106 @@ BSD find 上静默失效,导致「没有任何 XML 产出」这个错误结论�
 > 源码位置,失败时带 `issueRecorded` 事件。信息比 xunit 更丰富,
 > 但该 flag 同样未出现在 `--help` 中,且不是标准格式、GitHub 不原生渲染。
 > 当前选 xunit 是因为它是标准 JUnit 格式,工具链生态更通用。
+
+---
+
+## ADR-0004:测试替身放独立的 PilotTestSupport target
+
+**状态:** 已采纳
+**日期:** 2026-08-19
+**工作包:** P0-06
+
+### 背景
+
+P0-06 要建立测试替身。放哪里有三个选择。
+
+### 决策
+
+新建 `PilotTestSupport` target,依赖 `PilotCore` 与 `PilotInfrastructure`,
+**只被 test target 依赖,且不作为 product 暴露**。
+
+### 理由
+
+| 方案 | 问题 |
+|---|---|
+| 替身跟着各自协议放进产品模块 | 会跟着产品二进制发出去。一个能注入「磁盘满」的文件系统出现在正式构建里是负债,不只是死重量 |
+| 每个 test target 各放一份 | `FakeClock` 要复制两份。Phase 1 起几乎每个测试都要用,两份迟早分叉 |
+| **独立 target** | 一份实现,产品不携带 |
+
+这条由 `Scripts/check-module-boundaries.sh` 的**检查 4** 强制,两个方向都挡:
+非测试 target 不得依赖它,也不得把它做成 product。
+三个失败用例(Core 声明依赖、产品 target 依赖替身、替身被暴露为 product)
+都在 `Scripts/test-check-module-boundaries.sh` 里验证过确实会红。
+
+### 代价
+
+替身的改动会触发测试 target 重编。规模很小,可接受。
+
+---
+
+## ADR-0005:三个替身推迟到各自阶段,不在 P0-06 硬造
+
+**状态:** 已采纳
+**日期:** 2026-08-19
+**偏离:** v0.2 P0-06(列了六个替身,本次交付三个)
+
+### 背景
+
+P0-06 原文要求定义 `FakeProcessRunner`、`FakeGit`、`FakeGitHub`、
+`FakeClock`、`FakeFileSystem` 和 deterministic UUID provider。
+
+但替身必须是**某个协议**的替身,而后三个协议依赖的类型现在都不存在:
+
+| 协议(v0.2 §5) | 依赖的类型 | 由谁定义 |
+|---|---|---|
+| `ProcessRunning` | `ProcessSpecification` / `RunningProcess` / `ProcessIdentity` | P2-03 |
+| `GitOperating` | `RepositorySnapshot` / `WorktreeRequest` / `CommitResult` | P3-01 |
+| `GitHosting` | `PullRequestSnapshot` | P1-02 |
+
+### 决策
+
+**本次交付:** `FakeClock`、`DeterministicIdentifierProvider`、
+`InMemoryFileSystem`(含故障注入),以及它们对应的协议
+`TimeSource`、`IdentifierProvider`、`FileSystem`。
+
+**推迟:**
+
+| 替身 | 推迟到 | 那个工作包本来就包含它 |
+|---|---|---|
+| `FakeProcessRunner` | **P2-09** | 「建立 Fake CLI 套件。可脚本化输出、延迟、秒退、部分写入、非法 JSON、超大日志和信号处理」 |
+| `FakeGit` | **P3-01 之后** | RepositorySnapshot 的字段要从真实 git 行为推导 |
+| `FakeGitHub` | **P4-08 之后** | PullRequestSnapshot 由 P1-02 定义,字段要经 P4-02 能力探测确认 |
+
+### 理由
+
+v0.2 §11 规则 6:「遇到不确定 schema、第三方 CLI 行为或系统 API 时,
+**先生成证据任务,不自行假设**。」
+
+现在造出这三个协议,等于替 P1-02 / P3-01 / P4-08 猜领域模型。
+猜错要返工,猜对也是同一个类型定义两遍 —— 两种结果都伤可维护性。
+`FakeProcessRunner` 更直接:P2-09 本身就是它的归属,在这里做等于重复。
+
+反过来,交付的三个没有任何猜测成分:
+「现在几点」「下一个 UUID」「文件读写与原子替换」都是自足的语义,
+不依赖任何领域模型。
+
+**而且交付的这三个恰好是 Phase 1 唯一真正需要的。** P1-12 要求覆盖
+「写到一半崩溃、磁盘满、权限拒绝、文件被替换」,全部落在 `InMemoryFileSystem` 上;
+P1-01 / P1-02 的时间戳与 UUID 主键落在另外两个上。
+Phase 1 不需要 Process、Git 或 GitHub 的替身。
+
+### 代价
+
+- P0-06 的完成定义按 v0.2 原文不算全满足。这一条必须在 Phase 0 收尾时
+  连同 P0-04、P0-07、P0-08 一起复核,不能默认它已经关闭。
+- 若将来决定把 Phase 2 或 3 提前,需要先补对应替身。
+
+### 一个副产品
+
+`FileSystem` 同时交付了真假两个实现,并由 `FileSystemContractTests`
+**同一套用例跑两遍**。这不是额外功夫,是必要条件 ——
+只跟自己一致的假实现,证明不了任何关于真实环境的事。
+已验证该契约测试有分辨力:故意改错假实现的错误映射,只有假的那边会红。
+
+这套「一份契约,两个实现」的写法就是 v0.2 §6.1 第 2 条
+「基础设施 contract tests」的模板,后续 Process、Git、gh 的替身照此办理。

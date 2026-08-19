@@ -110,6 +110,36 @@ else
             printf '  \033[31m✗\033[0m Package.swift\n      → PilotCore 声明了 %s 个 target 依赖,应为 0\n' "$core_deps"
             fail=1
         fi
+
+        # ── 检查 4:测试替身不得进入产品 ───────────────────────────────
+        #
+        # PilotTestSupport 里有 FakeClock、InMemoryFileSystem 这些东西。
+        # 它们跟着产品二进制发出去不只是死重量 —— 一个能注入「磁盘满」的
+        # 文件系统出现在正式构建里是负债。
+        #
+        # 两个方向都要挡:非测试 target 不得依赖它,也不得把它做成 product
+        # 暴露给外部消费者。
+        leaked_targets=$(printf '%s' "$manifest" | jq -r '
+            [ .targets[]
+              | select(.type != "test")
+              | select(.name != "PilotTestSupport")
+              | select([.dependencies[]?.byName[0]?] | index("PilotTestSupport"))
+              | .name
+            ] | join(", ")')
+        if [ -n "$leaked_targets" ]; then
+            printf '  \033[31m✗\033[0m Package.swift\n      → 产品 target 依赖了 PilotTestSupport:%s\n      → 测试替身只能被 test target 依赖\n' "$leaked_targets"
+            fail=1
+        fi
+
+        leaked_products=$(printf '%s' "$manifest" | jq -r '
+            [ .products[]
+              | select([.targets[]?] | index("PilotTestSupport"))
+              | .name
+            ] | join(", ")')
+        if [ -n "$leaked_products" ]; then
+            printf '  \033[31m✗\033[0m Package.swift\n      → product 暴露了 PilotTestSupport:%s\n      → 测试替身不应作为 product 发布\n' "$leaked_products"
+            fail=1
+        fi
     fi
 fi
 

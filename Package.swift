@@ -6,6 +6,12 @@ import PackageDescription
 //   pilotctl ──┬──> PilotInfrastructure ──> PilotCore
 //              └───────────────────────────────^
 //
+//   PilotTestSupport ──> PilotInfrastructure, PilotCore
+//        ^
+//        └── 只被测试 target 依赖。它不是 product,产品 target 一律不得依赖它 ——
+//            否则 FakeClock、InMemoryFileSystem 这些会跟着二进制发出去。
+//            这条由 Scripts/check-module-boundaries.sh 的检查 4 强制。
+//
 // 方向由 SPM 在编译期强制:PilotCore 没有声明任何依赖,
 // 因此它在语法上就无法 import PilotInfrastructure。
 //
@@ -43,6 +49,12 @@ let package = Package(
             dependencies: ["PilotCore"],
             swiftSettings: strictSettings
         ),
+        // 测试替身(P0-06)。刻意不作为 product 暴露。
+        .target(
+            name: "PilotTestSupport",
+            dependencies: ["PilotCore", "PilotInfrastructure"],
+            swiftSettings: strictSettings
+        ),
         .executableTarget(
             name: "pilotctl",
             dependencies: ["PilotCore", "PilotInfrastructure"],
@@ -50,12 +62,17 @@ let package = Package(
         ),
         .testTarget(
             name: "PilotCoreTests",
-            dependencies: ["PilotCore"],
+            dependencies: ["PilotCore", "PilotTestSupport"],
             swiftSettings: strictSettings
         ),
         .testTarget(
             name: "PilotInfrastructureTests",
-            dependencies: ["PilotInfrastructure"],
+            dependencies: ["PilotInfrastructure", "PilotTestSupport"],
+            swiftSettings: strictSettings
+        ),
+        .testTarget(
+            name: "PilotTestSupportTests",
+            dependencies: ["PilotTestSupport"],
             swiftSettings: strictSettings
         ),
     ]
