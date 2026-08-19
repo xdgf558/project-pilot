@@ -286,3 +286,69 @@ Phase 1 不需要 Process、Git 或 GitHub 的替身。
 
 这套「一份契约,两个实现」的写法就是 v0.2 §6.1 第 2 条
 「基础设施 contract tests」的模板,后续 Process、Git、gh 的替身照此办理。
+
+---
+
+## ADR-0006:P0-04 只做 SPM 侧,签名相关部分随 Xcode 工程一起推迟
+
+**状态:** 已采纳
+**日期:** 2026-08-19
+**偏离:** v0.2 P0-04(还要求 Hardened Runtime 与 entitlements)
+
+### 背景
+
+P0-04 原文:「配置 Debug、Release 和测试环境。**Release 开启 Hardened Runtime;
+App 和 Agent 分别管理 entitlements**;v1 明确关闭 App Sandbox。」
+
+后两项在当前工程里**没有对应的东西可配**。Hardened Runtime 是 Xcode target
+的构建设置,entitlements 是 target 的 plist —— 而按 ADR-0002 现在没有
+`.xcodeproj`,按 ADR-0001 `PilotAgent` 也不存在。SPM 的 `Package.swift`
+里没有这两个概念。
+
+### 决策
+
+**本次交付:** Debug 与 Release 两种配置都构建、都跑测试,都进 CI,
+都要求零警告。
+
+**推迟到 Xcode 工程建立时(Phase 8 或更早,若提前需要界面):**
+Hardened Runtime、App 与 Agent 各自的 entitlements、
+显式关闭 App Sandbox 的 entitlement 声明。
+
+### 为什么 Release 值得单独跑,而不只是「再编一遍」
+
+实测(Swift 6.3,SPM 的 Debug 用 `-Onone`、Release 用 `-O`):
+
+| | `-Onone` | `-O` |
+|---|---|---|
+| `assert()` | 触发,退出 133 | **被整个移除,程序继续运行** |
+| `precondition()` | 触发,退出 133 | 触发,退出 133 |
+
+也就是说,写成 `assert` 的不变量检查在发布构建里**等于不存在**。
+对一个靠不变量支撑正确性的数据层,只测 Debug 意味着真正发出去的那个构建
+从来没有被验证过。优化器也会暴露 Debug 下看不见的警告。
+
+Release 下能跑测试是 P0-06 那轮审查的意外收益 —— 当时按建议把
+`@testable import` 改回普通 `import`,而 `@testable` 正是 Release 测试编不过的原因。
+
+### 为什么没有禁止 `assert()`
+
+考虑过在边界检查里禁掉 `Sources/` 下的 `assert(`。没做,理由是
+`assert` 有正当用途:开发期的昂贵自查,失效了也不影响正确性。
+一刀切禁掉是发明 v0.2 没有的政策。
+
+改为写进执行器规则(第 6 节),并靠 **Release 也跑测试**来提供实际防线 ——
+若有测试依赖 `assert` 触发,Release 那一遍会红。
+
+若将来发现 `assert` 被误用于真正的不变量,再加硬检查。
+
+### 代价
+
+- **Phase 0 退出闸门中的「Release 配置可以完成本地签名构建」当前不满足。**
+  这条与 P0-06 的推迟部分一样,必须在 Phase 0 收尾时复核,不能默认已关闭。
+- CI 时间约翻倍(构建与测试各跑两遍)。公开仓库跑标准 runner 不计费,
+  实测三次运行的计费分钟均为 0,这个代价可以接受。
+
+### 回退条件
+
+Xcode 工程建立后,把 Hardened Runtime 与 entitlements 补齐,
+并在 Phase 12 的签名清单(P12-01)里核对。

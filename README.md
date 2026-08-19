@@ -94,16 +94,21 @@ swift build
 swift test
 ```
 
-CI 跑的是下面六条,推送前本地先跑一遍能省一个来回:
+CI 跑的是下面八条,推送前本地先跑一遍能省一个来回:
 
 ```bash
 swift build -Xswiftc -warnings-as-errors
-swift test
+Scripts/run-tests.sh debug
+swift build -c release -Xswiftc -warnings-as-errors
+Scripts/run-tests.sh release
 Scripts/check-module-boundaries.sh
 Scripts/test-check-module-boundaries.sh
 Scripts/generate-executor-rules.sh --check
 Scripts/test-generate-executor-rules.sh
 ```
+
+Debug 和 Release 都跑,是因为两者行为真的不同 —— `-O` 下 `assert()` 被整个移除,
+`precondition()` 保留。只测 Debug,发布构建里少掉的那些检查就从来没被验证过。
 
 新增了 test target 之后要先 `rm -rf .build`,否则 SPM 不会重建测试 bundle,
 新套件会**静默不跑**。
