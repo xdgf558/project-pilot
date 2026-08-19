@@ -1,0 +1,80 @@
+# ── macOS ──────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Xcode ──────────────────────────────────────────────────────────────
+## Build 产物
+build/
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+## 用户级工程状态(每个人不一样,不该进仓库)
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+## Xcode 工程内嵌的 SPM 状态
+*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+*.xcworkspace/xcshareddata/swiftpm/
+
+## Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# ── Swift Package Manager ──────────────────────────────────────────────
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+
+# ── 依赖管理(如果将来用到)────────────────────────────────────────────
+Pods/
+Carthage/Build/
+fastlane/report.xml
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# ── 签名与凭据:绝对不能进公开仓库 ─────────────────────────────────────
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.certSigningRequest
+.env
+.env.*
+!.env.example
+secrets.json
+*credentials*.json
+*.pem
+*.key
+
+# ── ProjectPilot 运行时产物 ────────────────────────────────────────────
+# 作业目录(spec.json / heartbeat / exit.json / result.json)
+jobs/
+runs/
+# 本地任务数据与配置
+pm-data/
+tasks.json
+*.local.json
+# 契约测试的 --live 录制输出
+fixtures/live/
+
+# ── 日志与临时文件 ─────────────────────────────────────────────────────
+*.log
+*.tmp
+tmp/
+.claude/settings.local.json
