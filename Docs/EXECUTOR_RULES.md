@@ -77,6 +77,12 @@ Phase 0 有个现成例子:`swift test --xunit-output` 会把结果写到
 **全部 target 使用 Swift 6 语言模式,严格并发检查开启。**
 构建必须零警告 —— CI 用 `-Xswiftc -warnings-as-errors`。
 
+**不变量检查用 `precondition`,不要用 `assert`。**
+实测(Swift 6.3):`-O` 下 `assert()` 被**整个移除**,程序若无其事地继续跑;
+`precondition()` 保留。SPM 的 Debug 是 `-Onone`、Release 是 `-O`,
+所以写成 `assert` 的检查在发布构建里等于不存在。
+`assert` 只用于纯粹开发期的、失效了也不影响正确性的自查。
+
 **给外部系统写替身时,真假两个实现要跑同一套契约测试。**
 只跟自己一致的假实现,证明不了任何关于真实环境的事。
 参考 `Tests/PilotInfrastructureTests/FileSystemContractTests.swift`。
@@ -85,7 +91,9 @@ Phase 0 有个现成例子:`swift test --xunit-output` 会把结果写到
 
 ```
 swift build -Xswiftc -warnings-as-errors
-swift test
+Scripts/run-tests.sh debug
+swift build -c release -Xswiftc -warnings-as-errors
+Scripts/run-tests.sh release
 Scripts/check-module-boundaries.sh
 Scripts/test-check-module-boundaries.sh
 Scripts/generate-executor-rules.sh --check
@@ -93,6 +101,9 @@ Scripts/test-generate-executor-rules.sh
 ```
 
 CI 跑的就是这几条,本地先跑一遍能省一个来回。
+
+**Release 那两条不是多余的。** `-O` 下 `assert()` 会消失、优化器会暴露
+Debug 看不见的警告 —— 只测 Debug 等于发布构建从来没被验证过。
 
 新增了 test target 的话,先 `rm -rf .build` —— 否则 SPM 不会重建测试 bundle,
 新套件会**静默不跑**。
