@@ -95,7 +95,38 @@ jobs:
       - name: 单元测试
         run: |
           set -o pipefail
+          shopt -s nullglob
+          rm -f test-results*.xml
           swift test --xunit-output test-results.xml 2>&1 | tee test.log
+
+          # SwiftPM 不会把 Swift Testing 的结果写进你指定的那个文件名 ——
+          # 它写到 <去掉扩展名>-swift-testing.xml。指定路径本身只在 --parallel
+          # 下才生成,且只含 XCTest 结果(本项目没有 XCTest,那份是空的)。
+          # 详见 Docs/DECISIONS.md 的 ADR-0003。
+          #
+          # 所以必须断言产物真的存在、真的记了测试。P0-05 要求「上传测试结果」,
+          # 而第一版 CI 上传的是一个从不存在的路径 —— 那是一次不可见的降级,
+          # 恰好违背本工作流对 Xcode 漂移所主张的「降级要可见」。
+          xml=(test-results*.xml)
+          if [ ${#xml[@]} -eq 0 ]; then
+            echo "::error::未生成任何 xunit XML。上游行为可能已变更,见 ADR-0003。"
+            exit 1
+          fi
+          total=0
+          for f in "${xml[@]}"; do
+            n=$(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' "$f" | head -1)
+            echo "  $f  tests=${n:-0}"
+            total=$((total + ${n:-0}))
+          done
+          if [ "$total" -eq 0 ]; then
+            echo "::error::xunit XML 存在但记录了 0 个测试。见 ADR-0003。"
+            exit 1
+          fi
+          {
+            echo "## 测试"
+            echo "xunit 记录 **$total** 个测试:"
+            printf '%s\n' "${xml[@]}" | sed 's/^/- `/;s/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 模块边界检查
         run: Scripts/check-module-boundaries.sh
@@ -110,7 +141,7 @@ jobs:
         with:
           name: test-results-${{ github.run_id }}
           path: |
-            test-results.xml
+            test-results*.xml
             build.log
             test.log
           retention-days: 14

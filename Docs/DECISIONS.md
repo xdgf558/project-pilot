@@ -108,3 +108,78 @@ Package 运行 `swift test`**」,v0.3 §7 也确认第一到第四步不产生�
 若 Phase 8 集成时出现无法解决的链接或签名问题,退回 v0.2 原方案:
 把 Core 与 Infrastructure 改为 Xcode framework target。
 届时源码目录结构不变,只改构建系统。
+
+---
+
+## ADR-0003:xunit 测试结果的文件名由上游决定,CI 必须断言产物存在
+
+**状态:** 已采纳
+**日期:** 2026-08-19
+**触发:** PR #2 审查发现「上传测试结果」实际未交付
+
+### 背景
+
+P0-05 要求 CI「上传测试结果与失败日志」。第一版 CI 写的是
+`swift test --xunit-output test-results.xml`,上传 `test-results.xml`。
+实际 artifact 里只有 `build.log` 与 `test.log`,**XML 从未被上传**,
+而 `if-no-files-found: warn` 把这次缺失降级成一条不显眼的 annotation,CI 照样绿。
+
+### 实测(Swift 6.3.3 / Xcode 26.6 build 17F113)
+
+| 调用 | 产出 |
+|---|---|
+| `swift test --xunit-output test-results.xml` | 仅 `test-results-swift-testing.xml`,`tests="3"`,内容正确 |
+| 加 `--parallel` | 上者,**加上** `test-results.xml`,`tests="0"`(XCTest 用,本项目没有 XCTest) |
+| 绝对路径 `/tmp/x-r.xml` | 仍加后缀:`/tmp/x-r-swift-testing.xml` |
+
+**SwiftPM 把 Swift Testing 的结果写到「去掉扩展名 + `-swift-testing.xml`」,
+而不是你指定的文件名。** 你指定的那个路径是留给 XCTest 的,且只在 `--parallel` 下生成。
+
+一个反面教训:排查过程中曾误判为「xunit 只覆盖 XCTest,对 Swift Testing 静默忽略」——
+那是被 `--parallel` 产生的空 `test-results.xml` 误导。真相是文件一直在生成,
+只是名字不同。**用 `find -newermt` 找新文件时也踩了坑:那是 GNU 语法,
+BSD find 上静默失效,导致「没有任何 XML 产出」这个错误结论。**
+
+### 决策
+
+1. 继续用 `--xunit-output`,**不加 `--parallel`** —— 加了只会多出一个
+   `tests="0"` 的空文件,比没有更误导。
+2. 上传路径改为 glob `test-results*.xml`,不写死单个文件名。
+3. **CI 硬断言**:至少存在一个 `test-results*.xml`,且其中记录的测试数大于 0。
+   任一条不满足就红,并指向本 ADR。
+4. 测试数写进 job summary。
+
+### 理由
+
+这正是 v0.3 §3 描述的静默破坏:`--xunit-output` 接受了 flag、退出码 0、
+指定路径下什么都没有。**程序不会崩,只会行为错误。**
+
+本工作流对 Xcode 版本漂移主张「降级要可见,不该熔断」(v0.3 异议 1),
+而测试结果缺失恰恰是一次不可见的降级 —— 同一套标准必须适用于自己。
+
+断言用 glob 而不是写死后缀:若上游哪天改了命名,glob 仍能捕获;
+若上游彻底不再产出,断言会红。两种变化都可见。
+
+### 代价
+
+- `-swift-testing` 后缀不在 `swift test --help` 里,属于未文档化的上游行为,
+  可能随工具链变化。断言就是为此存在的。
+- 断言依赖 `<testsuite ... tests="N">` 的属性格式。格式若变,断言会误判为 0 并红 ——
+  失败方向安全(宁可错杀),且错误信息指向本 ADR。
+
+### 后续
+
+这条属于 v0.3 §3 P2-10 契约测试的范围。Phase 2 建立契约测试套件时,
+把「`swift test --xunit-output` 的实际产出文件名与内容」作为一条断言录入,
+并用录制的 fixture 离线跑(P2-11)。
+
+### 回退条件
+
+若上游提供了稳定且文档化的测试结果输出(例如 `--xunit-output` 直接写入
+指定路径,或 swift-testing 的事件流转正),改用该机制并保留断言。
+
+> 备选方案已验证可用:`swift test --event-stream-output-path <path>
+> --event-stream-version 0` 产出 JSON Lines 事件流,含 suite/测试名、
+> 源码位置,失败时带 `issueRecorded` 事件。信息比 xunit 更丰富,
+> 但该 flag 同样未出现在 `--help` 中,且不是标准格式、GitHub 不原生渲染。
+> 当前选 xunit 是因为它是标准 JUnit 格式,工具链生态更通用。
