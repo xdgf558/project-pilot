@@ -63,6 +63,51 @@ run_case "改了权威源没重新生成 → 拒绝"    edit_canonical_only   1
 run_case "生成物被删 → 拒绝"              delete_generated_file 1
 
 echo
+echo "标记校验"
+#
+# 这些错误的共同点是**静默丢内容**,而漂移检查抓不到 ——
+# 它比对权威源和生成物,拼错之后重新生成两边一起变,CI 照样绿。
+# 所以必须在生成阶段硬失败。
+#
+# 定位标记用整行精确匹配,不写死行号:权威源顶部的说明段落里
+# 就出现了 `<!--only:codex-->` 这个字符串作为散文,
+# 用子串替换会打到那一处而不是真正的标记行 —— 踩过这个坑。
+
+mutate_marker() {
+    python3 -c "
+import io
+p = 'Docs/EXECUTOR_RULES.md'
+lines = io.open(p, encoding='utf-8').read().split('\n')
+opens  = [i for i, l in enumerate(lines) if l.startswith('<!--only:') and l.endswith('-->')]
+closes = [i for i, l in enumerate(lines) if l == '<!--/only-->']
+$1
+io.open(p, 'w', encoding='utf-8').write('\n'.join(lines))
+"
+}
+
+run_marker_case() {
+    local name="$1" expr="$2"
+    mutate_marker "$expr"
+    "$GEN" >/dev/null 2>&1
+    local got=$?
+    cleanup_to_backup
+    if [ "$got" -ne 0 ]; then
+        printf '  \033[32m✓\033[0m %s\n' "$name"
+        pass=$((pass + 1))
+    else
+        printf '  \033[31m✗\033[0m %s  (应当硬失败,实际退出码 0 —— 内容被静默丢弃)\n' "$name"
+        fail=$((fail + 1))
+    fi
+}
+
+run_marker_case "目标名拼错 → 拒绝"        "lines[opens[-1]] = '<!--only:claud-->'"
+run_marker_case "目标名大小写错 → 拒绝"    "lines[opens[-1]] = '<!--only:Claude-->'"
+run_marker_case "开标记拼错 → 拒绝"        "lines[opens[0]] = '<!--onlyy:codex-->'"
+run_marker_case "结束标记拼错 → 拒绝"      "lines[closes[-1]] = '<!--/onlyy-->'"
+run_marker_case "多余的结束标记 → 拒绝"    "lines.append('<!--/only-->')"
+run_marker_case "块未闭合就开新块 → 拒绝"  "lines[closes[-1]] = '<!--only:codex-->'"
+
+echo
 echo "生成的正确性"
 
 # 专用小节必须各进各家,不能串门
