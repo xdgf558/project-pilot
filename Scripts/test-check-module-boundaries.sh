@@ -82,33 +82,59 @@ case_file "允许 import Foundation"       "$CORE_DIR"  0 'import Foundation
 public let now = Date()'
 
 echo
-echo "依赖方向声明(检查 3)"
-MANIFEST_BACKUP="Package.swift.testbak"
-cp Package.swift "$MANIFEST_BACKUP"
-# 给 PilotCore 硬塞一个依赖,断言检查器能发现
-python3 - <<'PY'
+echo "Package.swift 层面的检查(检查 3、4)"
+
+# 每个用例:备份清单 → 变换 → 跑检查 → 还原 → 比对退出码
+run_manifest_case() {
+    local name="$1" mutate="$2" want="$3"
+    MANIFEST_BACKUP="Package.swift.testbak"
+    cp Package.swift "$MANIFEST_BACKUP"
+    "$mutate"
+    "$CHECK" >/dev/null 2>&1
+    local got=$?
+    mv -f "$MANIFEST_BACKUP" Package.swift; MANIFEST_BACKUP=""
+    if [ "$got" -eq "$want" ]; then
+        printf '  \033[32m✓\033[0m %s\n' "$name"
+        pass=$((pass + 1))
+    else
+        printf '  \033[31m✗\033[0m %s  (期望退出码 %s,实际 %s)\n' "$name" "$want" "$got"
+        fail=$((fail + 1))
+    fi
+}
+
+# 变换用 sed 而非 python:这些锚点都是单行,sed 够用且没有嵌套引号的坑。
+mutate_core_gains_dependency() {
+    sed -i '' 's|            name: "PilotCore",|            name: "PilotCore",\
+            dependencies: ["PilotInfrastructure"],|' Package.swift
+}
+
+mutate_product_target_uses_test_support() {
+    # pilotctl 的依赖行是唯一同时含三者的位置,直接定位它
+    python3 -c "
 import io
 s = io.open('Package.swift', encoding='utf-8').read()
-old = '''        .target(
-            name: "PilotCore",
-            swiftSettings: strictSettings
-        ),'''
-new = '''        .target(
-            name: "PilotCore",
-            dependencies: ["PilotInfrastructure"],
-            swiftSettings: strictSettings
-        ),'''
-assert old in s, "anchor not found"
-io.open('Package.swift', 'w', encoding='utf-8').write(s.replace(old, new))
-PY
-"$CHECK" >/dev/null 2>&1
-got=$?
-mv -f "$MANIFEST_BACKUP" Package.swift; MANIFEST_BACKUP=""
-if [ "$got" -eq 1 ]; then
-    printf '  \033[32m✓\033[0m PilotCore 声明依赖时被拒\n'; pass=$((pass + 1))
-else
-    printf '  \033[31m✗\033[0m PilotCore 声明依赖应被拒(期望 1,实际 %s)\n' "$got"; fail=$((fail + 1))
-fi
+i = s.index('name: \"pilotctl\",')
+j = s.index('dependencies: [', i)
+k = s.index(']', j)
+s = s[:j] + 'dependencies: [\"PilotCore\", \"PilotInfrastructure\", \"PilotTestSupport\"' + s[k:]
+io.open('Package.swift', 'w', encoding='utf-8').write(s)
+"
+}
+
+mutate_test_support_becomes_product() {
+    python3 -c "
+import io
+s = io.open('Package.swift', encoding='utf-8').read()
+anchor = '.executable(name: \"pilotctl\", targets: [\"pilotctl\"]),'
+assert anchor in s
+s = s.replace(anchor, anchor + '\n        .library(name: \"PilotTestSupport\", targets: [\"PilotTestSupport\"]),')
+io.open('Package.swift', 'w', encoding='utf-8').write(s)
+"
+}
+
+run_manifest_case "PilotCore 声明依赖时被拒"        mutate_core_gains_dependency            1
+run_manifest_case "产品 target 依赖替身时被拒"      mutate_product_target_uses_test_support 1
+run_manifest_case "替身被暴露为 product 时被拒"     mutate_test_support_becomes_product     1
 
 echo
 if [ "$fail" -eq 0 ]; then
