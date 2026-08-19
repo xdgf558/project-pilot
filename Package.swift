@@ -14,7 +14,8 @@ import PackageDescription
 // 该脚本在 CI 中运行。
 //
 // 这里没有 ProjectPilot.app:界面在 Phase 8 才需要,届时以独立 Xcode
-// 工程链接本 package。理由见 Docs/DECISIONS.md 的 ADR-0001。
+// 工程链接本 package —— 见 Docs/DECISIONS.md 的 ADR-0002。
+// 也没有 PilotAgent:不建空 target 的理由见 ADR-0001。
 
 /// P0-03:全部 target 使用 Swift 6 语言模式,严格并发检查默认开启。
 let strictSettings: [SwiftSetting] = [

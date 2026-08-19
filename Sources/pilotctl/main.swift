@@ -19,37 +19,45 @@ import PilotInfrastructure
 
 let version = "0.0.0-dev"
 
-func printUsage() {
-    print("""
-    pilotctl \(version)
+let usage = """
+pilotctl \(version)
 
-    用法:
-      pilotctl version     打印版本
-      pilotctl modules     打印已链接模块与依赖方向
-      pilotctl help        打印本说明
-    """)
+用法:
+  pilotctl version     打印版本
+  pilotctl modules     打印已链接模块与依赖方向
+  pilotctl help        打印本说明
+"""
+
+func writeLine(_ text: String, toStandardError: Bool = false) {
+    if toStandardError {
+        FileHandle.standardError.write(Data((text + "\n").utf8))
+    } else {
+        print(text)
+    }
 }
 
 let arguments = CommandLine.arguments.dropFirst()
 
 switch arguments.first {
 case "version":
-    print(version)
+    writeLine(version)
 
 case "modules":
     // 打印实际链接到的模块链。依赖方向若与 Package.swift 声明不符,这里会立刻暴露。
-    print("pilotctl -> \(PilotInfrastructure.moduleName) -> \(PilotCore.moduleName)")
+    writeLine("pilotctl -> \(PilotInfrastructure.moduleName) -> \(PilotCore.moduleName)")
     precondition(
         PilotInfrastructure.dependsOn == PilotCore.moduleName,
         "依赖方向与声明不符"
     )
 
 case "help", "--help", "-h", nil:
-    printUsage()
+    // 用户主动要说明书,走 stdout —— 这样 `pilotctl help | less` 才有意义。
+    writeLine(usage)
 
 case let unknown?:
-    // 未知子命令必须以非零退出码失败,否则脚本会把打字错误当成功。
-    FileHandle.standardError.write(Data("未知子命令:\(unknown)\n\n".utf8))
-    printUsage()
+    // 出错路径:诊断和说明书都走 stderr,退出码非零。
+    // 否则管道下游会把说明书当成正常输出,脚本也会把打字错误当成功。
+    writeLine("未知子命令:\(unknown)\n", toStandardError: true)
+    writeLine(usage, toStandardError: true)
     exit(2)
 }

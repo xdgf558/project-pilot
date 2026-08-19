@@ -4,19 +4,46 @@
 # SPM 在编译期强制的是「谁能 import 谁」。这个脚本补的是另一半:
 # PilotCore 内部不许出现任何 IO 或 UI 符号 —— 那是 SPM 看不见的。
 #
-# 检查前会剥掉注释,否则 PilotCore.swift 里那段说明边界的文档注释
-# 本身就会把自己判红。
+# ── 关于剥注释 ──
+# 检查前必须剥掉注释,否则 PilotCore.swift 里那段说明边界的文档注释
+# 本身就会把自己判红。剥注释用 awk 状态机,能正确处理跨行块注释,
+# 并保留行号(整行内容清空但不删行)。
 #
-# 已知限制:剥注释是按行处理的,字符串字面量里的 "//" 之后的内容会被
-# 一并剥掉。这只会造成漏报,不会造成误报,可以接受。
+# 已知限制:不识别字符串字面量。字符串里出现 "//" 或 "/*" 会被当成
+# 注释起点,后续内容被误剥。这个方向是**漏报**(少检查),不是误报。
+# 反方向的误报需要字符串里恰好有 "*/" 把块注释提前闭合 —— 构造得出来,
+# 实践中不会发生。真要杜绝就得上真正的 Swift parser,当前不值这个成本。
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 fail=0
 
+# 剥掉行注释与块注释(含跨行),保留行数以维持行号准确。
 strip_comments() {
-    sed -e 's|/\*.*\*/||g' -e 's|//.*$||'
+    awk '
+    BEGIN { inblock = 0 }
+    {
+        line = $0; out = ""; i = 1; n = length(line)
+        while (i <= n) {
+            if (inblock) {
+                p = index(substr(line, i), "*/")
+                if (p > 0) { i = i + p + 1; inblock = 0 } else { i = n + 1 }
+            } else {
+                rest = substr(line, i)
+                a = index(rest, "//")
+                b = index(rest, "/*")
+                if (a > 0 && (b == 0 || a < b)) {
+                    out = out substr(line, i, a - 1); i = n + 1
+                } else if (b > 0) {
+                    out = out substr(line, i, b - 1); i = i + b + 1; inblock = 1
+                } else {
+                    out = out rest; i = n + 1
+                }
+            }
+        }
+        print out
+    }'
 }
 
 report() {
@@ -25,27 +52,30 @@ report() {
     fail=1
 }
 
+scan() {
+    # $1=文件 $2=正则 $3=原因
+    while IFS=: read -r lineno content; do
+        [ -z "${lineno:-}" ] && continue
+        report "$1" "$lineno" "$(echo "$content" | sed 's/^[[:space:]]*//')" "$3"
+    done < <(strip_comments < "$1" | grep -nE "$2")
+}
+
 # ── 检查 1:PilotCore 必须保持纯净 ─────────────────────────────────────
 #
-# 禁止的 import 与符号。PilotCore 要能在没有磁盘、没有网络、没有 Git 仓库
-# 的情况下被完整测试 —— Phase 5 的决策表测试和属性测试全依赖这一点。
+# PilotCore 要能在没有磁盘、没有网络、没有 Git 仓库的情况下被完整测试 ——
+# Phase 5 的决策表测试和属性测试全依赖这一点。
+#
+# import 前缀允许零个或多个 attribute,且 attribute 名可含下划线。
+# @_exported / @_implementationOnly 是真实存在的重导出手段,
+# 用 [a-zA-Z]+ 会被它们绕过。
 
-CORE_FORBIDDEN_IMPORTS='^[[:space:]]*(@[a-zA-Z]+[[:space:]]+)?import[[:space:]]+(AppKit|UIKit|SwiftUI|XPC|Network|ServiceManagement|PilotInfrastructure)\b'
+CORE_FORBIDDEN_IMPORTS='^[[:space:]]*(@[_a-zA-Z]+[[:space:]]+)*import[[:space:]]+(AppKit|UIKit|SwiftUI|XPC|Network|ServiceManagement|PilotInfrastructure)\b'
 CORE_FORBIDDEN_SYMBOLS='\b(Process|NSTask|FileManager|FileHandle|Pipe|URLSession|NSXPCConnection)\b'
 
 echo "检查 PilotCore 纯净性…"
 while IFS= read -r file; do
-    while IFS=: read -r lineno content; do
-        [ -z "${lineno:-}" ] && continue
-        report "$file" "$lineno" "$(echo "$content" | sed 's/^[[:space:]]*//')" \
-            "PilotCore 不得引入 IO / UI / XPC 依赖"
-    done < <(strip_comments < "$file" | grep -nE "$CORE_FORBIDDEN_IMPORTS")
-
-    while IFS=: read -r lineno content; do
-        [ -z "${lineno:-}" ] && continue
-        report "$file" "$lineno" "$(echo "$content" | sed 's/^[[:space:]]*//')" \
-            "PilotCore 不得直接做 IO,把它挪到 PilotInfrastructure"
-    done < <(strip_comments < "$file" | grep -nE "$CORE_FORBIDDEN_SYMBOLS")
+    scan "$file" "$CORE_FORBIDDEN_IMPORTS" "PilotCore 不得引入 IO / UI / XPC 依赖"
+    scan "$file" "$CORE_FORBIDDEN_SYMBOLS" "PilotCore 不得直接做 IO,把它挪到 PilotInfrastructure"
 done < <(find Sources/PilotCore -name '*.swift' 2>/dev/null)
 
 # ── 检查 2:全代码库禁止拼接 shell 命令 ────────────────────────────────
@@ -57,19 +87,30 @@ SHELL_FORBIDDEN='(/bin/(ba|z)?sh|/usr/bin/env[[:space:]]+(ba|z)?sh)'
 
 echo "检查 shell 拼接…"
 while IFS= read -r file; do
-    while IFS=: read -r lineno content; do
-        [ -z "${lineno:-}" ] && continue
-        report "$file" "$lineno" "$(echo "$content" | sed 's/^[[:space:]]*//')" \
-            "禁止通过 shell 执行外部命令,改用 Process.executableURL + 参数数组"
-    done < <(strip_comments < "$file" | grep -nE "$SHELL_FORBIDDEN")
+    scan "$file" "$SHELL_FORBIDDEN" "禁止通过 shell 执行外部命令,改用 Process.executableURL + 参数数组"
 done < <(find Sources -name '*.swift' 2>/dev/null)
 
-# ── 检查 3:Package.swift 的依赖声明未被反转 ───────────────────────────
+# ── 检查 3:PilotCore 未声明任何 target 依赖 ───────────────────────────
+#
+# 解析 SPM 真实清单,而不是 grep Package.swift 的文本 ——
+# 文本窗口会被 path:/exclude: 之类的新增行挤破。
 
 echo "检查依赖方向声明…"
-if grep -A3 'name: "PilotCore"' Package.swift | grep -q 'dependencies'; then
-    printf '  \033[31m✗\033[0m Package.swift\n      → PilotCore 不应声明任何 target 依赖\n'
-    fail=1
+if ! command -v jq >/dev/null 2>&1; then
+    printf '  \033[33m!\033[0m 未找到 jq,跳过依赖声明检查\n'
+else
+    manifest=$(swift package dump-package 2>/dev/null)
+    if [ -z "$manifest" ]; then
+        printf '  \033[31m✗\033[0m 无法解析 Package.swift(swift package dump-package 失败)\n'
+        fail=1
+    else
+        core_deps=$(printf '%s' "$manifest" \
+            | jq -r '[.targets[] | select(.name == "PilotCore") | .dependencies[]?] | length')
+        if [ "${core_deps:-0}" != "0" ]; then
+            printf '  \033[31m✗\033[0m Package.swift\n      → PilotCore 声明了 %s 个 target 依赖,应为 0\n' "$core_deps"
+            fail=1
+        fi
+    fi
 fi
 
 echo
