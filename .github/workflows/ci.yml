@@ -1,0 +1,148 @@
+# CI(P0-05)
+#
+# 跑四件事:构建(警告即错误)、单元测试、模块边界检查、边界检查器自身的测试。
+# 前三项是 Phase 0 退出闸门的直接要求 —— 尤其「依赖方向有**自动**检查」这条,
+# 在本工作流存在之前只能靠人手动敲脚本,并不成立。
+#
+# ── 版本固定(v0.2 §11 规则 8:不使用 latest 浮动版本)──
+#
+# runner 用 macos-26 而不是 macos-latest —— 后者会随 GitHub 的迁移窗口漂移。
+# macos-26 是 arm64 镜像,与开发机一致,也符合 v0.2 §0.3「v1 仅支持 Apple Silicon」。
+#
+# 第三方 action 锁到 commit SHA 而不是 @v7 —— tag 是会被移动的,只有 SHA 不会。
+# SHA 后面的注释写明对应版本,便于人读。更新由 Dependabot 提 PR,人工决定,
+# 见 .github/dependabot.yml。
+#
+# Xcode 锁到具体路径 + 断言 build 号。找不到该路径时**硬失败**(跑不了已验证
+# 版本就不该假装通过);build 号漂移时只**告警不熔断** —— 依据 v0.3「异议 1」:
+# 降级要可见,不该是熔断。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 最小权限:CI 只需要读代码。
+permissions:
+  contents: read
+
+# 同一分支的新推送取消旧运行,避免排队浪费。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-test:
+    name: 构建与测试
+    runs-on: macos-26
+    timeout-minutes: 20
+
+    env:
+      # 已验证的工具链。升级时改这两行,并按 v0.3 §4 的流程走:
+      # 记录回滚点 → 升级 → 跑契约测试 → 绿则记 ADR,红则查哪条契约破了。
+      VERIFIED_XCODE_APP: /Applications/Xcode_26.6.app
+      VERIFIED_XCODE_BUILD: 17F113
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 固定工具链并记录版本
+        run: |
+          if [ ! -d "$VERIFIED_XCODE_APP" ]; then
+            echo "::error::找不到已验证的 Xcode:$VERIFIED_XCODE_APP"
+            echo "runner 镜像已变更。按 v0.2 §11 规则 8,升级必须是主动决定 ——"
+            echo "请先在本地验证新版本,再更新本工作流的 VERIFIED_XCODE_APP。"
+            echo "镜像上现有的 Xcode:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || echo "  (一个都没有)"
+            exit 1
+          fi
+          sudo xcode-select -s "$VERIFIED_XCODE_APP"
+
+          actual_build=$(xcodebuild -version | sed -n 's/^Build version //p')
+          if [ "$actual_build" != "$VERIFIED_XCODE_BUILD" ]; then
+            echo "::warning::Xcode build 号漂移 —— 期望 $VERIFIED_XCODE_BUILD,实际 $actual_build。不熔断,但请确认契约未破。"
+          fi
+
+          # 这份记录就是「已验证版本」的凭据。git 与 gh 的版本给 Phase 2 的
+          # 契约测试(P2-10)做基线参考 —— 注意那是 CI 环境的版本,不等于开发机。
+          {
+            echo "## 工具链"
+            echo '```'
+            sw_vers
+            echo "---"
+            xcodebuild -version
+            echo "---"
+            swift --version
+            echo "---"
+            echo "git $(git --version | sed 's/^git version //')"
+            echo "gh  $(gh --version | head -1 | sed 's/^gh version //')"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 构建(警告即错误)
+        run: |
+          set -o pipefail
+          swift build -Xswiftc -warnings-as-errors 2>&1 | tee build.log
+
+      - name: 单元测试
+        run: |
+          set -o pipefail
+          shopt -s nullglob
+          rm -f test-results*.xml
+          swift test --xunit-output test-results.xml 2>&1 | tee test.log
+
+          # SwiftPM 不会把 Swift Testing 的结果写进你指定的那个文件名 ——
+          # 它写到 <去掉扩展名>-swift-testing.xml。指定路径本身只在 --parallel
+          # 下才生成,且只含 XCTest 结果(本项目没有 XCTest,那份是空的)。
+          # 详见 Docs/DECISIONS.md 的 ADR-0003。
+          #
+          # 所以必须断言产物真的存在、真的记了测试。P0-05 要求「上传测试结果」,
+          # 而第一版 CI 上传的是一个从不存在的路径 —— 那是一次不可见的降级,
+          # 恰好违背本工作流对 Xcode 漂移所主张的「降级要可见」。
+          xml=(test-results*.xml)
+          if [ ${#xml[@]} -eq 0 ]; then
+            echo "::error::未生成任何 xunit XML。上游行为可能已变更,见 ADR-0003。"
+            exit 1
+          fi
+          total=0
+          for f in "${xml[@]}"; do
+            n=$(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' "$f" | head -1)
+            echo "  $f  tests=${n:-0}"
+            total=$((total + ${n:-0}))
+          done
+          if [ "$total" -eq 0 ]; then
+            echo "::error::xunit XML 存在但记录了 0 个测试。见 ADR-0003。"
+            exit 1
+          fi
+          {
+            echo "## 测试"
+            echo "xunit 记录 **$total** 个测试:"
+            printf '%s\n' "${xml[@]}" | sed 's/^/- `/;s/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 模块边界检查
+        run: Scripts/check-module-boundaries.sh
+
+      - name: 边界检查器自身的测试
+        run: Scripts/test-check-module-boundaries.sh
+
+      - name: 上传测试结果与日志
+        # P0-05 要求上传测试结果与失败日志。失败时最需要这些,所以用 always()。
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ github.run_id }}
+          path: |
+            test-results*.xml
+            build.log
+            test.log
+          retention-days: 14
+          if-no-files-found: warn
