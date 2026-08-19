@@ -132,7 +132,7 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
         // 故障要在参数校验之后判断:真实文件系统也是先解析路径再遇到 ENOSPC。
         try requireParentDirectory(of: path, url: url)
         if case .directory = nodes[path] {
-            throw FileSystemError.alreadyExists(url)
+            throw FileSystemError.isDirectory(url)
         }
         try begin(.write, url, partialWrite: { prefix in
             self.nodes[path] = .file(data.prefix(prefix))
@@ -162,7 +162,9 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
         }
         for component in components.reversed() {
             if case .file = nodes[component] {
-                throw FileSystemError.alreadyExists(URL(fileURLWithPath: component))
+                // 真实实现拿到的是 ENOTDIR,携带的是**请求的**路径而不是那个挡路的中间层 ——
+                // rename/mkdir 系统调用不会告诉你是哪一层挡住的。这里跟着它走。
+                throw FileSystemError.notADirectory(url)
             }
             nodes[component] = .directory
         }
@@ -192,6 +194,9 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
 
         let path = Self.key(url)
         guard nodes[path] != nil else { throw FileSystemError.notFound(url) }
+        // 真实文件系统会拒绝删除根。假实现原本会把自己整个清空 ——
+        // 一个真实环境里不可能发生的破坏,不该在测试里可能发生。
+        guard path != "/" else { throw FileSystemError.permissionDenied(url) }
 
         // 连同全部后代一起删。
         let prefix = path == "/" ? "/" : path + "/"
@@ -208,6 +213,14 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
         let sourcePath = Self.key(source)
         let destinationPath = Self.key(destination)
         guard let node = nodes[sourcePath] else { throw FileSystemError.notFound(source) }
+
+        // 契约限定为文件(见 FileSystem 协议文档)。
+        // 早先这里直接搬了目录节点却没搬后代,留下一批挂在旧前缀上的孤儿 ——
+        // exists(dst) 为真、子项却找不到,内部状态自相矛盾。
+        // 那种损坏最坏的后果不是报错,而是让后续测试假绿。
+        if case .directory = node { throw FileSystemError.isDirectory(source) }
+        if case .directory = nodes[destinationPath] { throw FileSystemError.isDirectory(destination) }
+
         try requireParentDirectory(of: destinationPath, url: destination)
 
         nodes[destinationPath] = node
@@ -230,7 +243,9 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
         }) else { return }
 
         faults[index].remaining -= 1
-        switch faults[index].fault {
+        let fault = faults[index].fault
+        if faults[index].remaining == 0 { faults.remove(at: index) }
+        switch fault {
         case .diskFull: throw FileSystemError.diskFull(url)
         case .permissionDenied: throw FileSystemError.permissionDenied(url)
         case .notFound: throw FileSystemError.notFound(url)

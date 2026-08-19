@@ -10,6 +10,8 @@ public enum FileSystemError: Error, Equatable, Sendable {
     case permissionDenied(URL)
     case diskFull(URL)
     case notADirectory(URL)
+    /// 目标是目录,但这个操作只接受文件。对应 POSIX 的 `EISDIR`。
+    case isDirectory(URL)
     case alreadyExists(URL)
     case io(url: URL, detail: String)
 }
@@ -41,5 +43,13 @@ public protocol FileSystem: Sendable {
     /// 这是整个数据层的地基。真实实现用 POSIX `rename(2)` —— 同一文件系统内它是原子的,
     /// 要么完全生效要么完全不生效,不存在「替换到一半」的中间态。
     /// 崩溃恢复能成立就靠这个保证。
+    ///
+    /// **契约限定为文件。** source 或 destination 是目录时抛 `.isDirectory`。
+    ///
+    /// 这是刻意收窄的。目录 rename 的 POSIX 语义有一串交叉规则 ——
+    /// 目标是非空目录报 `ENOTEMPTY`、目录覆盖到文件报 `ENOTDIR`、
+    /// 反向报 `EISDIR` —— 在内存实现里把这些全补齐,是为一个当前没人需要的能力
+    /// 造出三个新的真假分歧面。数据层的原子写(P1-05)只动文件。
+    /// 将来真需要移动目录时,再作为一个明确的决定加进来。
     func replaceItem(at destination: URL, withItemAt source: URL) throws
 }

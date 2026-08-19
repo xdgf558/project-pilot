@@ -1,7 +1,7 @@
 import Foundation
 import Testing
-@testable import PilotCore
-@testable import PilotTestSupport
+import PilotCore
+import PilotTestSupport
 
 @Suite("FakeClock")
 struct FakeClockTests {

@@ -67,13 +67,26 @@ public struct SystemFileSystem: FileSystem {
     }
 
     public func replaceItem(at destination: URL, withItemAt source: URL) throws {
+        // 契约限定为文件(见协议文档)。这里先拒绝目录,让真假两个实现在
+        // 同一个点上失败,而不是各自走进 POSIX 的目录 rename 分支。
+        // 代价是多一次 stat —— 相对于随后的写入加 fsync 可以忽略。
+        if isDirectory(at: source) { throw FileSystemError.isDirectory(source) }
+        if isDirectory(at: destination) { throw FileSystemError.isDirectory(destination) }
+
+        // rename(2) 的 ENOENT 既可能是源不存在,也可能是目标的父目录不存在,
+        // 而 errno 不区分。下面统一按目标路径报错,所以这里先把「源不存在」
+        // 单独挑出来 —— 源缺失却指着目标路径喊 notFound,会把排查引向错误的地方。
+        if !exists(at: source) { throw FileSystemError.notFound(source) }
+
         // 直接用 POSIX rename(2):同一文件系统内原子,且目标已存在时会覆盖。
         // FileManager 没有对等语义 —— moveItem 在目标存在时失败,
         // replaceItemAt 会做备份腾挪并要求原件存在,两者都不是我们要的保证。
         let status = source.withUnsafeFileSystemRepresentation { src -> Int32 in
-            guard let src else { return -1 }
+            // 路径无法转成文件系统表示时必须自己设 errno,
+            // 否则下面读到的是上一次系统调用留下的陈旧值。
+            guard let src else { errno = EINVAL; return -1 }
             return destination.withUnsafeFileSystemRepresentation { dst -> Int32 in
-                guard let dst else { return -1 }
+                guard let dst else { errno = EINVAL; return -1 }
                 return rename(src, dst)
             }
         }
@@ -124,6 +137,7 @@ public struct SystemFileSystem: FileSystem {
         case EACCES, EPERM: return .permissionDenied(url)
         case ENOSPC, EDQUOT: return .diskFull(url)
         case ENOTDIR: return .notADirectory(url)
+        case EISDIR: return .isDirectory(url)
         case EEXIST: return .alreadyExists(url)
         default:
             return .io(url: url, detail: String(cString: strerror(code)))

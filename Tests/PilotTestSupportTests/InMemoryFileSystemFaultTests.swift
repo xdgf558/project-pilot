@@ -1,7 +1,7 @@
 import Foundation
 import Testing
-@testable import PilotInfrastructure
-@testable import PilotTestSupport
+import PilotInfrastructure
+import PilotTestSupport
 
 /// 故障注入的测试。
 ///
@@ -133,5 +133,21 @@ struct InMemoryFileSystemFaultTests {
 
         try fs.write(Data("x".utf8), to: file)
         #expect(fs.exists(at: file))
+    }
+
+    @Test("拒绝删除根,不会把自己清空")
+    func refusesToRemoveRoot() throws {
+        let (fs, root) = try makeSubject()
+        try fs.write(Data("x".utf8), to: root.appendingPathComponent("state.json"))
+
+        #expect(throws: FileSystemError.permissionDenied(URL(fileURLWithPath: "/"))) {
+            try fs.removeItem(at: URL(fileURLWithPath: "/"))
+        }
+        #expect(fs.exists(at: root))
+
+        // 这条只测假实现,不进契约测试 ——
+        // 拿真实文件系统跑「删除根目录」本身就不该做。真实那边靠的是
+        // 系统保护(macOS 上报 "Read-only file system"),具体错误跨平台不稳定,
+        // 强行对齐等于把一个危险操作写进日常测试。
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 import Testing
-@testable import PilotInfrastructure
-@testable import PilotTestSupport
+import PilotInfrastructure
+import PilotTestSupport
 
 /// FileSystem 的契约测试。
 ///
@@ -82,7 +82,9 @@ struct FileSystemContractTests {
         defer { cleanup() }
 
         let nested = root.appendingPathComponent("missing-dir/file.json")
-        #expect(throws: (any Error).self) {
+        // 断言到具体 case 而不是 (any Error).self ——
+        // 弱断言下,错误映射改坏了这条路径照样绿,等于没测。
+        #expect(throws: FileSystemError.notFound(nested)) {
             try fs.write(Data("x".utf8), to: nested)
         }
         #expect(fs.exists(at: nested) == false)
@@ -215,10 +217,75 @@ struct FileSystemContractTests {
         let final = root.appendingPathComponent("state.json")
         try fs.write(Data("old".utf8), to: final)
 
-        #expect(throws: (any Error).self) {
+        #expect(throws: FileSystemError.notFound(missing)) {
             try fs.replaceItem(at: final, withItemAt: missing)
         }
         // 失败后原文件必须原封不动 —— 否则一次失败的写入就毁了数据。
         #expect(try fs.read(at: final) == Data("old".utf8))
+    }
+
+    // MARK: - 边缘:此前真假分歧,现已对齐
+    //
+    // 这四条都不是想出来的,是拿探针逐个对比真假实现跑出来的。
+    // 契约测试的价值全在覆盖面上 —— 没写进来的边缘,分歧就是不可见的。
+
+    @Test("往目录路径写文件报 isDirectory", arguments: Implementation.allCases)
+    func writeOntoDirectory(_ implementation: Implementation) throws {
+        let (fs, root, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+
+        let dir = root.appendingPathComponent("jobs", isDirectory: true)
+        try fs.createDirectory(at: dir)
+
+        #expect(throws: FileSystemError.isDirectory(dir)) {
+            try fs.write(Data("x".utf8), to: dir)
+        }
+    }
+
+    @Test("中间层是文件时建目录报 notADirectory", arguments: Implementation.allCases)
+    func createDirectoryThroughFile(_ implementation: Implementation) throws {
+        let (fs, root, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+
+        try fs.write(Data("f".utf8), to: root.appendingPathComponent("blocker"))
+        let blocked = root.appendingPathComponent("blocker/deep", isDirectory: true)
+
+        // 携带的是**请求的**路径,不是那个挡路的中间层 ——
+        // mkdir 系统调用不会告诉你是哪一层挡住的,契约跟着它走。
+        #expect(throws: FileSystemError.notADirectory(blocked)) {
+            try fs.createDirectory(at: blocked)
+        }
+    }
+
+    @Test("replaceItem 拒绝目录作为源", arguments: Implementation.allCases)
+    func replaceRejectsDirectorySource(_ implementation: Implementation) throws {
+        let (fs, root, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+
+        let source = root.appendingPathComponent("src", isDirectory: true)
+        try fs.createDirectory(at: source)
+        try fs.write(Data("c".utf8), to: source.appendingPathComponent("child.txt"))
+
+        #expect(throws: FileSystemError.isDirectory(source)) {
+            try fs.replaceItem(at: root.appendingPathComponent("dst"), withItemAt: source)
+        }
+        // 拒绝必须发生在改动任何状态之前 —— 半途失败会留下孤儿节点。
+        #expect(fs.exists(at: source.appendingPathComponent("child.txt")))
+    }
+
+    @Test("replaceItem 拒绝目录作为目标", arguments: Implementation.allCases)
+    func replaceRejectsDirectoryDestination(_ implementation: Implementation) throws {
+        let (fs, root, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+
+        let source = root.appendingPathComponent("state.json.tmp")
+        let destination = root.appendingPathComponent("occupied", isDirectory: true)
+        try fs.write(Data("new".utf8), to: source)
+        try fs.createDirectory(at: destination)
+
+        #expect(throws: FileSystemError.isDirectory(destination)) {
+            try fs.replaceItem(at: destination, withItemAt: source)
+        }
+        #expect(try fs.read(at: source) == Data("new".utf8))
     }
 }
