@@ -1,0 +1,16 @@
+# Dependabot(配合 P0-05)
+#
+# CI 里的第三方 action 锁的是 commit SHA,不是 @v7 这种会移动的 tag。
+# 好处是别人改了 tag 指向也影响不到我们;代价是 SHA 会悄悄变旧。
+#
+# Dependabot 正好补上这一环:它**提 PR,不自动合** —— 与 v0.3 §4 的
+# P12-13「实现升级检查,只提示不自动升」同一个原则。升级永远是主动决定。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(ci)"
