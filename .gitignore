@@ -38,8 +38,8 @@ playground.xcworkspace
 # ── Swift Package Manager ──────────────────────────────────────────────
 .build/
 .swiftpm/
-Packages/
-Package.resolved
+# Package.resolved 必须提交 —— v0.2 §11 规则 8:不使用 latest 浮动版本,
+# 依赖版本要能精确复现和回滚。
 
 # ── 依赖管理(如果将来用到)────────────────────────────────────────────
 Pods/
