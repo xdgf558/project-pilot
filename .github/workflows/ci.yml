@@ -134,6 +134,15 @@ jobs:
       - name: 边界检查器自身的测试
         run: Scripts/test-check-module-boundaries.sh
 
+      - name: 执行器规则漂移检查
+        # AGENTS.md 与 CLAUDE.md 是生成物。分开维护的失败方式是静默的 ——
+        # 只改了一边,同一个工作包派给 Codex 和派给 Claude 会得到不同行为,
+        # 而没有任何东西会报错。这一步让漂移变成硬失败。
+        run: Scripts/generate-executor-rules.sh --check
+
+      - name: 规则生成器自身的测试
+        run: Scripts/test-generate-executor-rules.sh
+
       - name: 上传测试结果与日志
         # P0-05 要求上传测试结果与失败日志。失败时最需要这些,所以用 always()。
         if: always()
