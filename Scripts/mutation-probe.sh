@@ -50,7 +50,13 @@ restore() {
         BACKUP=""
     fi
 }
-trap restore EXIT INT TERM
+# EXIT 只负责还原文件。INT/TERM 必须**额外退出** ——
+# bash 的 trap 跑完会继续执行下一条语句,于是 Ctrl-C 打断构建时:
+# 子进程被信号杀死 → trap 还原 → 脚本继续 → `if ! build` 看到非零
+# → 打印「✓ 被拦下(构建阶段)」并 exit 0。
+# 用户只是中断,结论却是「拦下了」,批量跑时这就是假证据。
+trap restore EXIT
+trap 'restore; exit 130' INT TERM
 
 say()  { printf '  %-10s %s\n' "$1" "$2"; }
 good() { printf '  %-10s \033[32m%s\033[0m\n' "$1" "$2"; }
@@ -83,6 +89,9 @@ elif [ "$occurrences" -gt 1 ] && [ -z "$wanted" ]; then
     bad "锚点" "命中 $occurrences 处,不知道该改哪一处"
     say "" "用 MUTATION_PROBE_OCCURRENCE=N 指定(从 1 起),或把原文写得更长"
     exit 2
+elif [ -n "$wanted" ] && { [ "$wanted" -lt 1 ] || [ "$wanted" -gt "$occurrences" ]; }; then
+    bad "锚点" "指定了第 $wanted 处,但只命中 $occurrences 处"
+    exit 2
 else
     say "锚点" "命中 $occurrences 处${wanted:+,使用第 $wanted 处}"
 fi
@@ -97,9 +106,18 @@ if [ "${MUTATION_PROBE_SKIP_BASELINE:-0}" != "1" ]; then
 fi
 
 # ── 3. 施加变异 ───────────────────────────────────────────────────────
-BACKUP=$(mktemp)
-cp "$TARGET" "$BACKUP"
-ORIGINAL="$ORIGINAL" REPLACEMENT="$REPLACEMENT" python3 -c '
+# 先备份到暂存位置,**拷完之后**才让 restore 认它。
+#
+# 直接写 BACKUP=$(mktemp) 会开一个致命窗口:mktemp 建的是**空文件**,
+# 信号若落在 mktemp 与 cp 之间,restore 就把那个空文件盖到目标上,
+# 把源码清空。实测 8 次中断有 7 次踩中 —— 这个窗口比看上去宽得多。
+staging=$(mktemp)
+cp "$TARGET" "$staging"
+BACKUP="$staging"
+# 变异必须确认施加成功。不查这一步,python 抛异常时脚本会拿着**没改过的**
+# 文件跑完,然后报「没有任何东西拦下」—— 一个方向相反的假阴性。
+# 这正是本工具要防的那个坑,只是发生在工具自己身上。
+if ! ORIGINAL="$ORIGINAL" REPLACEMENT="$REPLACEMENT" python3 -c '
 import io, os, sys
 path = sys.argv[1]
 old, new = os.environ["ORIGINAL"], os.environ["REPLACEMENT"]
@@ -108,8 +126,17 @@ text = io.open(path, encoding="utf-8").read()
 index = -1
 for _ in range(nth):
     index = text.index(old, index + 1)
-io.open(path, "w", encoding="utf-8").write(text[:index] + new + text[index + len(old):])
-' "$TARGET" "$wanted"
+# 原子写:先写同目录临时文件,再 os.replace 换过去。
+# 直接就地写会留下一个截断窗口 —— 实测中断落在这个窗口里时,
+# 目标文件被清空,而 trap 的还原已经跑过了。
+# 这和 P0-06 里 SystemFileSystem.replaceItem 要解决的是同一个问题。
+temporary = path + ".mutation-probe-tmp"
+io.open(temporary, "w", encoding="utf-8").write(text[:index] + new + text[index + len(old):])
+os.replace(temporary, path)
+' "$TARGET" "$wanted"; then
+    bad "变异" "施加失败 —— 探针没跑成,不能据此得出任何结论"
+    exit 2
+fi
 
 # ── 4. 分阶段判定,不把不同的失败方式混为一谈 ──────────────────────────
 if ! build_output=$($BUILD_COMMAND 2>&1); then
@@ -130,12 +157,22 @@ if printf '%s' "$test_output" | grep -qE 'Fatal error|Precondition failed|Assert
     exit 0
 fi
 
-failed_functions=$(printf '%s' "$test_output" | grep -oE '✘ Test "[^"]+"' | sort -u | wc -l | tr -d ' ')
+# 按「测试名 + 源文件」去重,不能只按名字 —— 本仓库有四个套件都有
+# 叫「往返相等」的测试,只按名字去重会把它们算成一个。
+failed_functions=$(printf '%s' "$test_output" | python3 -c '
+import re, sys
+seen = set()
+for line in sys.stdin:
+    match = re.search(r"✘ Test \"([^\"]+)\".*? at ([^:]+):", line)
+    if match:
+        seen.add((match.group(1), match.group(2).rsplit("/", 1)[-1]))
+print(len(seen))
+')
 failed_cases=$(printf '%s' "$test_output" | grep -c 'recorded an issue')
 
 if [ "$failed_functions" -gt 0 ]; then
     good "测试" "$failed_functions 个函数红 / $failed_cases 个用例"
-    say "" "$(printf '%s' "$test_output" | grep -oE '✘ Test "[^"]+"' | sort -u | head -1 | sed 's/✘ Test //')"
+    say "" "$(printf '%s' "$test_output" | grep -oE '✘ Test "[^"]+"' | head -1 | sed 's/✘ Test //')"
     good "结论" "✓ 被拦下(测试阶段)"
     exit 0
 fi

@@ -86,6 +86,26 @@ else
     printf '  \033[31m✗\033[0m 指定第几处后可继续 (退出码 %s,还原 %s)\n' "$got" "$restored"; fail=$((fail + 1))
 fi
 
+reset_target
+MUTATION_PROBE_OCCURRENCE=0 "$PROBE" "$TARGET" "alpha" "x" "案例" >/dev/null 2>&1
+got=$?; cmp -s "$TARGET" "$PRISTINE" && restored=是 || restored=否
+if [ "$got" -eq 2 ] && [ "$restored" = "是" ]; then
+    printf '  \033[32m✓\033[0m 指定第 0 处时拒绝\n'; pass=$((pass + 1))
+else
+    printf '  \033[31m✗\033[0m 指定第 0 处时拒绝 (退出码 %s,还原 %s)\n' "$got" "$restored"; fail=$((fail + 1))
+fi
+
+reset_target; printf 'dup\ndup\n' > "$TARGET"; cp "$TARGET" "$PRISTINE"
+MUTATION_PROBE_OCCURRENCE=3 "$PROBE" "$TARGET" "dup" "x" "案例" >/dev/null 2>&1
+got=$?; cmp -s "$TARGET" "$PRISTINE" && restored=是 || restored=否
+if [ "$got" -eq 2 ] && [ "$restored" = "是" ]; then
+    printf '  \033[32m✓\033[0m 指定的处数越界时拒绝\n'; pass=$((pass + 1))
+else
+    # 越界时若不拦,python 抛异常、替换根本没发生,脚本却拿着**没改过的**
+    # 文件跑完并报「没有任何东西拦下」—— 一个方向相反的假阴性。
+    printf '  \033[31m✗\033[0m 指定的处数越界时拒绝 (退出码 %s,还原 %s)\n' "$got" "$restored"; fail=$((fail + 1))
+fi
+
 echo
 echo "改动被拦下(退出码 0)—— 三种拦法都要认得"
 export MUTATION_PROBE_BUILD="$BUILD_BAD" MUTATION_PROBE_TEST="$TEST_PASS"
@@ -111,6 +131,46 @@ unset MUTATION_PROBE_SKIP_BASELINE
 export MUTATION_PROBE_BUILD="$BUILD_OK" MUTATION_PROBE_TEST="$TEST_FAIL"
 run_case "基线本来就红时拒绝"  2 "$TARGET" "alpha" "x" "案例"
 export MUTATION_PROBE_SKIP_BASELINE=1
+
+echo
+echo "计数口径"
+TEST_SAMENAME="$WORK/test-samename"
+make_stub "$TEST_SAMENAME" 1 '✘ Test "往返相等" recorded an issue at /x/ProjectTests.swift:12:5: 断言失败
+✘ Test "往返相等" recorded an issue at /x/BlockerTests.swift:20:5: 断言失败
+✘ Test run with 10 tests in 2 suites failed'
+export MUTATION_PROBE_BUILD="$BUILD_OK" MUTATION_PROBE_TEST="$TEST_SAMENAME"
+reset_target
+output=$("$PROBE" "$TARGET" "alpha" "x" "同名测试" 2>&1)
+# 本仓库有四个套件都有叫「往返相等」的测试。只按名字去重会把它们算成一个,
+# 让「这个变异打红了多少地方」显著低估。
+if printf '%s' "$output" | grep -q "2 个函数红"; then
+    printf '  \033[32m✓\033[0m 同名测试跨套件不合并计数\n'; pass=$((pass + 1))
+else
+    printf '  \033[31m✗\033[0m 同名测试跨套件不合并计数:%s\n' "$(printf '%s' "$output" | grep 测试 | head -1)"; fail=$((fail + 1))
+fi
+
+echo
+echo "被中断时不能损坏源文件"
+SLOW_BUILD="$WORK/slow-build"; printf '#!/bin/bash\nsleep 30\n' > "$SLOW_BUILD"; chmod +x "$SLOW_BUILD"
+export MUTATION_PROBE_BUILD="$SLOW_BUILD" MUTATION_PROBE_TEST="$TEST_PASS"
+damaged=0
+for _ in 1 2 3 4 5; do
+    reset_target
+    "$PROBE" "$TARGET" "alpha" "x" "会被中断" >"$WORK/interrupted.log" 2>&1 &
+    probe_pid=$!
+    ( while ! grep -q "锚点" "$WORK/interrupted.log" 2>/dev/null; do :; done
+      kill -TERM $probe_pid 2>/dev/null )
+    wait $probe_pid
+    cmp -s "$TARGET" "$PRISTINE" || damaged=$((damaged + 1))
+done
+if [ "$damaged" -eq 0 ]; then
+    printf '  \033[32m✓\033[0m 5 次中断后源文件完好\n'; pass=$((pass + 1))
+else
+    # 这条防的是两个真实存在过的窗口:mktemp 建出空文件后、拷贝完成前被中断,
+    # 还原会把空文件盖到目标上;以及就地写入被中断留下截断的文件。
+    printf '  \033[31m✗\033[0m 5 次中断有 %s 次损坏源文件\n' "$damaged"; fail=$((fail + 1))
+fi
+export MUTATION_PROBE_BUILD="$BUILD_OK" MUTATION_PROBE_TEST="$TEST_PASS"
 
 echo
 echo "端到端(真实 swift 命令)"
