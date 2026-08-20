@@ -132,6 +132,11 @@ jobs:
       - name: 规则生成器自身的测试
         run: Scripts/test-generate-executor-rules.sh
 
+      - name: 变异探针自身的测试
+        # 探针是用来判断「测试有没有拦住改动」的工具。它自己判断错了,
+        # 得到的是一个方向相反的结论 —— 比没有探针更坏。
+        run: Scripts/test-mutation-probe.sh
+
       - name: 上传测试结果与日志
         # P0-05 要求上传测试结果与失败日志。失败时最需要这些,所以用 always()。
         if: always()

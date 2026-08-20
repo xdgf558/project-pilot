@@ -48,6 +48,21 @@
 带着真 bug 通过了手工冒烟(一个正则被 `@_exported` 绕过,
 一个多行块注释被误判),都是靠注入违规才发现的。
 
+**用 `Scripts/mutation-probe.sh <文件> <原文> <替换文> [描述]` 做,不要手工。**
+
+```
+Scripts/mutation-probe.sh Sources/PilotCore/Domain/Blocker.swift \
+    "    case reviewStale" "    case reviewOutdated" "改一个 code 名字"
+```
+
+退出码 0 表示改动被拦下了(**这是期望结果**),1 表示没被拦下,
+2 表示探针自己没跑成。
+
+手工做这件事出错率很高,而且**四种失效方式都会把「没拦住」误报成结论**:
+锚点没命中、锚点命中了文档里的同样字样、构建失败、进程被 precondition 中止 ——
+后两种确实拦下了改动,只是不长成测试失败的样子,直接 grep 会数到 0 条。
+探针把这几种分开判,并强制锚点唯一。
+
 弱断言同样等于没测。断言到具体的错误类型,不要用「抛了个错就行」——
 那样错误映射改坏了测试照样绿。
 
@@ -102,6 +117,7 @@ Scripts/check-module-boundaries.sh
 Scripts/test-check-module-boundaries.sh
 Scripts/generate-executor-rules.sh --check
 Scripts/test-generate-executor-rules.sh
+Scripts/test-mutation-probe.sh
 ```
 
 CI 跑的就是这几条,本地先跑一遍能省一个来回。
