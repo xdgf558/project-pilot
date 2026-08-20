@@ -106,6 +106,18 @@ else
     printf '  \033[31m✗\033[0m 指定的处数越界时拒绝 (退出码 %s,还原 %s)\n' "$got" "$restored"; fail=$((fail + 1))
 fi
 
+reset_target
+stderr_lines=$(MUTATION_PROBE_OCCURRENCE=abc "$PROBE" "$TARGET" "alpha" "x" "案例" 2>&1 >/dev/null | wc -l | tr -d ' ')
+MUTATION_PROBE_OCCURRENCE=abc "$PROBE" "$TARGET" "alpha" "x" "案例" >/dev/null 2>&1
+got=$?
+if [ "$got" -eq 2 ] && [ "$stderr_lines" -eq 0 ]; then
+    printf '  \033[32m✓\033[0m 非数字的处数:拒绝且 stderr 干净\n'; pass=$((pass + 1))
+else
+    # 直接拿非数字去做 [ -lt ] 比较会漏一行「integer expression expected」——
+    # 退出码虽然对,用户看到的却是 shell 在抱怨,不是探针在解释。
+    printf '  \033[31m✗\033[0m 非数字的处数 (退出码 %s,stderr %s 行)\n' "$got" "$stderr_lines"; fail=$((fail + 1))
+fi
+
 echo
 echo "改动被拦下(退出码 0)—— 三种拦法都要认得"
 export MUTATION_PROBE_BUILD="$BUILD_BAD" MUTATION_PROBE_TEST="$TEST_PASS"
@@ -163,6 +175,12 @@ for _ in 1 2 3 4 5; do
     wait $probe_pid
     cmp -s "$TARGET" "$PRISTINE" || damaged=$((damaged + 1))
 done
+leaked=$(ls "${TMPDIR:-/tmp}"/mutation-probe-* 2>/dev/null | wc -l | tr -d ' ')
+if [ "$leaked" -eq 0 ]; then
+    printf '  \033[32m✓\033[0m 5 次中断后无暂存文件泄漏\n'; pass=$((pass + 1))
+else
+    printf '  \033[31m✗\033[0m 5 次中断泄漏了 %s 个暂存文件\n' "$leaked"; fail=$((fail + 1))
+fi
 if [ "$damaged" -eq 0 ]; then
     printf '  \033[32m✓\033[0m 5 次中断后源文件完好\n'; pass=$((pass + 1))
 else

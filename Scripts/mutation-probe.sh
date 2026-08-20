@@ -43,11 +43,20 @@ REPLACEMENT="$3"
 LABEL="${4:-$TARGET}"
 BACKUP=""
 
+STAGING=""
+
 restore() {
     if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
         cp -f "$BACKUP" "$TARGET"
         rm -f "$BACKUP"
         BACKUP=""
+    fi
+    # 暂存文件单独清。信号若落在 mktemp 与 cp 之间,BACKUP 还没被赋值
+    # (那是有意的,见下面),但 mktemp 已经建了文件 —— 不清就会在
+    # TMPDIR 里留下一个空文件。源码无损,但泄漏会累积。
+    if [ -n "$STAGING" ]; then
+        rm -f "$STAGING"
+        STAGING=""
     fi
 }
 # EXIT 只负责还原文件。INT/TERM 必须**额外退出** ——
@@ -89,6 +98,12 @@ elif [ "$occurrences" -gt 1 ] && [ -z "$wanted" ]; then
     bad "锚点" "命中 $occurrences 处,不知道该改哪一处"
     say "" "用 MUTATION_PROBE_OCCURRENCE=N 指定(从 1 起),或把原文写得更长"
     exit 2
+elif [ -n "$wanted" ] && ! printf '%s' "$wanted" | grep -qE '^[0-9]+$'; then
+    # 先判是不是数字。直接拿去做 [ -lt ] 比较会漏一行
+    # 「integer expression expected」的 shell 内部报错 —— 退出码虽然对,
+    # 但用户看到的是 shell 在抱怨,不是探针在解释。
+    bad "锚点" "MUTATION_PROBE_OCCURRENCE 必须是正整数,收到:$wanted"
+    exit 2
 elif [ -n "$wanted" ] && { [ "$wanted" -lt 1 ] || [ "$wanted" -gt "$occurrences" ]; }; then
     bad "锚点" "指定了第 $wanted 处,但只命中 $occurrences 处"
     exit 2
@@ -111,9 +126,13 @@ fi
 # 直接写 BACKUP=$(mktemp) 会开一个致命窗口:mktemp 建的是**空文件**,
 # 信号若落在 mktemp 与 cp 之间,restore 就把那个空文件盖到目标上,
 # 把源码清空。实测 8 次中断有 7 次踩中 —— 这个窗口比看上去宽得多。
-staging=$(mktemp)
-cp "$TARGET" "$staging"
-BACKUP="$staging"
+# 路径先定,文件后建 —— 顺序反过来就还有一个窗口:mktemp 已经建出文件、
+# 变量还没被赋值时被中断,trap 无从得知要清哪个,文件就泄漏在 TMPDIR 里。
+# 先赋值的代价只是 trap 可能去 rm 一个不存在的文件,那是无害的。
+STAGING="${TMPDIR:-/tmp}/mutation-probe-$$-$(date +%s)"
+cp "$TARGET" "$STAGING"
+BACKUP="$STAGING"
+STAGING=""   # 已经交给 BACKUP 管,不再重复清
 # 变异必须确认施加成功。不查这一步,python 抛异常时脚本会拿着**没改过的**
 # 文件跑完,然后报「没有任何东西拦下」—— 一个方向相反的假阴性。
 # 这正是本工具要防的那个坑,只是发生在工具自己身上。
