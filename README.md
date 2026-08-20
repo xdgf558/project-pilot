@@ -94,7 +94,7 @@ swift build
 swift test
 ```
 
-CI 跑的是下面八条,推送前本地先跑一遍能省一个来回:
+CI 跑的是下面九条,推送前本地先跑一遍能省一个来回:
 
 ```bash
 swift build -Xswiftc -warnings-as-errors
@@ -105,6 +105,7 @@ Scripts/check-module-boundaries.sh
 Scripts/test-check-module-boundaries.sh
 Scripts/generate-executor-rules.sh --check
 Scripts/test-generate-executor-rules.sh
+Scripts/test-mutation-probe.sh
 ```
 
 Debug 和 Release 都跑,是因为两者行为真的不同 —— `-O` 下 `assert()` 被整个移除,
