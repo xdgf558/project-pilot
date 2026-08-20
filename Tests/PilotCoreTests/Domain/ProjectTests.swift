@@ -83,18 +83,18 @@ struct ProjectTests {
     @Test("空项目名解码失败")
     func rejectsEmptyName() throws {
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeProject())
-        let broken = try replacing(data, key: "name", with: "\"\"")
+        let broken = try JSONMutation.replacing(data, key: "name", with: "")
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(Project.self, from: broken)
         } == .dataCorrupted)
     }
 
-    @Test("并发上限小于 1 解码失败", arguments: ["0", "-1"])
-    func rejectsInvalidConcurrency(_ value: String) throws {
+    @Test("并发上限小于 1 解码失败", arguments: [0, -1])
+    func rejectsInvalidConcurrency(_ value: Int) throws {
         // 想让项目停下来用暂停,不是把上限设成 0 ——
         // 那样「暂停了」和「配置错了」在数据上分不开。
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeProject())
-        let broken = try replacing(data, key: "projectConcurrency", with: value)
+        let broken = try JSONMutation.replacing(data, key: "projectConcurrency", with: value)
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(Project.self, from: broken)
         } == .dataCorrupted)
@@ -103,7 +103,7 @@ struct ProjectTests {
     @Test("并发上限类型不符时报 typeMismatch")
     func rejectsWrongTypeForConcurrency() throws {
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeProject())
-        let broken = try replacing(data, key: "projectConcurrency", with: "\"1\"")
+        let broken = try JSONMutation.replacing(data, key: "projectConcurrency", with: "1")
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(Project.self, from: broken)
         } == .typeMismatch)
@@ -112,7 +112,16 @@ struct ProjectTests {
     @Test("未知的调度模式解码失败")
     func rejectsUnknownSchedulerMode() throws {
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeProject())
-        let broken = try replacing(data, key: "schedulerMode", with: "\"turbo\"")
+        let broken = try JSONMutation.replacing(data, key: "schedulerMode", with: "turbo")
+        #expect(decodingErrorKind {
+            _ = try CanonicalJSON.makeDecoder().decode(Project.self, from: broken)
+        } == .dataCorrupted)
+    }
+
+    @Test("未知的仓库策略解码失败")
+    func rejectsUnknownRepositoryPolicy() throws {
+        let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeProject())
+        let broken = try JSONMutation.replacing(data, key: "repositoryPolicy", with: "readonly")
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(Project.self, from: broken)
         } == .dataCorrupted)
@@ -123,13 +132,4 @@ struct ProjectTests {
         #expect(Set(SchedulerMode.allCases.map(\.rawValue)) == ["manual", "assisted", "automatic"])
         #expect(Set(RepositoryPolicy.allCases.map(\.rawValue)) == ["personal", "protected"])
     }
-}
-
-private func replacing(_ data: Data, key: String, with value: String) throws -> Data {
-    let text = try #require(String(data: data, encoding: .utf8))
-    let pattern = "\"\(key)\" : "
-    let range = try #require(text.range(of: pattern))
-    let afterKey = text[range.upperBound...]
-    let end = try #require(afterKey.firstIndex(where: { $0 == "," || $0 == "\n" }))
-    return Data((text[..<range.upperBound] + value + afterKey[end...]).utf8)
 }

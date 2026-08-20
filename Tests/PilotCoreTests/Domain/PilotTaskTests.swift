@@ -59,7 +59,7 @@ struct PilotTaskTests {
     @Test("displayNumber 小于 1 时解码失败")
     func rejectsInvalidDisplayNumber() throws {
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeTask())
-        let broken = try brokenJSON(data, key: "displayNumber", value: "0")
+        let broken = try JSONMutation.replacing(data, key: "displayNumber", with: 0)
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(PilotTask.self, from: broken)
         } == .dataCorrupted)
@@ -68,7 +68,7 @@ struct PilotTaskTests {
     @Test("空标题解码失败")
     func rejectsEmptyTitle() throws {
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeTask())
-        let broken = try brokenJSON(data, key: "title", value: "\"\"")
+        let broken = try JSONMutation.replacing(data, key: "title", with: "")
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(PilotTask.self, from: broken)
         } == .dataCorrupted)
@@ -77,7 +77,7 @@ struct PilotTaskTests {
     @Test("PR 编号小于 1 时解码失败")
     func rejectsInvalidPullRequestNumber() throws {
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeTask(pullRequestNumber: 42))
-        let broken = try brokenJSON(data, key: "pullRequestNumber", value: "0")
+        let broken = try JSONMutation.replacing(data, key: "pullRequestNumber", with: 0)
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(PilotTask.self, from: broken)
         } == .dataCorrupted)
@@ -87,7 +87,7 @@ struct PilotTaskTests {
     func rejectsWrongTypeForDisplayNumber() throws {
         // 正交对照:确认实现不是把所有失败都返回成 dataCorrupted。
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeTask())
-        let broken = try brokenJSON(data, key: "displayNumber", value: "\"12\"")
+        let broken = try JSONMutation.replacing(data, key: "displayNumber", with: "12")
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(PilotTask.self, from: broken)
         } == .typeMismatch)
@@ -96,9 +96,7 @@ struct PilotTaskTests {
     @Test("缺字段时报 keyNotFound")
     func rejectsMissingField() throws {
         let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeTask())
-        var tree = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        tree.removeValue(forKey: "stage")
-        let broken = try JSONSerialization.data(withJSONObject: tree)
+        let broken = try JSONMutation.removing(data, key: "stage")
         #expect(decodingErrorKind {
             _ = try CanonicalJSON.makeDecoder().decode(PilotTask.self, from: broken)
         } == .keyNotFound)
@@ -118,6 +116,21 @@ struct PilotTaskTests {
         }
     }
 
+    @Test("未知枚举值解码失败", arguments: [
+        ("stage", "shipped"), ("type", "chore"),
+        ("completionPolicy", "whenever"), ("executorPreference", "gemini"),
+    ])
+    func rejectsUnknownEnumValue(_ key: String, _ unknown: String) throws {
+        // 未知值不能被当成某个已知值,也不能被忽略 —— 前者会让任务
+        // 显示成错误的阶段,后者会让它凭空消失。
+        // BlockerCode 与 SchedulerMode 已有同类用例,这里补齐其余四个家族。
+        let data = try CanonicalJSON.makeSnapshotEncoder().encode(makeTask(pullRequestNumber: 1))
+        let broken = try JSONMutation.replacing(data, key: key, with: unknown)
+        #expect(decodingErrorKind {
+            _ = try CanonicalJSON.makeDecoder().decode(PilotTask.self, from: broken)
+        } == .dataCorrupted, "\(key)=\(unknown)")
+    }
+
     @Test("枚举 raw value 写死")
     func rawValuesArePinned() {
         // raw value 就是落盘格式,改 case 名等于改数据格式。
@@ -133,14 +146,4 @@ struct PilotTaskTests {
             "codex", "claude", "projectDefault",
         ])
     }
-}
-
-/// 把一份合法 JSON 里的某个键换成给定的原始值。
-private func brokenJSON(_ data: Data, key: String, value: String) throws -> Data {
-    let text = try #require(String(data: data, encoding: .utf8))
-    let pattern = "\"\(key)\" : "
-    let range = try #require(text.range(of: pattern))
-    let afterKey = text[range.upperBound...]
-    let end = try #require(afterKey.firstIndex(where: { $0 == "," || $0 == "\n" }))
-    return Data((text[..<range.upperBound] + value + afterKey[end...]).utf8)
 }
