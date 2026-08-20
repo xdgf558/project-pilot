@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import PilotCore
+import PilotTestSupport
 
 @Suite("Checksum")
 struct ChecksumTests {
@@ -60,15 +61,23 @@ struct ChecksumTests {
 
     @Test("长度不对的十六进制串解码失败", arguments: ["\"abc\"", "\"0123456789abcdef0\"", "\"\""])
     func rejectsWrongLength(_ text: String) {
-        #expect(throws: DecodingError.self) {
-            try JSONDecoder().decode(Checksum.self, from: Data(text.utf8))
-        }
+        #expect(decodingErrorKind {
+            _ = try JSONDecoder().decode(Checksum.self, from: Data(text.utf8))
+        } == .dataCorrupted)
     }
 
     @Test("非十六进制字符解码失败")
     func rejectsNonHexadecimal() {
-        #expect(throws: DecodingError.self) {
-            try JSONDecoder().decode(Checksum.self, from: Data("\"zzzzzzzzzzzzzzzz\"".utf8))
-        }
+        #expect(decodingErrorKind {
+            _ = try JSONDecoder().decode(Checksum.self, from: Data("\"zzzzzzzzzzzzzzzz\"".utf8))
+        } == .dataCorrupted)
+    }
+
+    @Test("校验和是数字而非字符串时报类型不符")
+    func rejectsNumericChecksum() {
+        // 与「格式不对」区分开:这是类型用错了,不是值损坏。
+        #expect(decodingErrorKind {
+            _ = try JSONDecoder().decode(Checksum.self, from: Data("255".utf8))
+        } == .typeMismatch)
     }
 }

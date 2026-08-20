@@ -36,10 +36,11 @@ public struct Checksum: Sendable, Hashable, Codable, CustomStringConvertible {
     }
 
     public init(from decoder: any Decoder) throws {
-        let text = try decoder.singleValueContainer().decode(String.self)
+        let container = try decoder.singleValueContainer()
+        let text = try container.decode(String.self)
         guard text.count == 16, let parsed = UInt64(text, radix: 16) else {
             throw DecodingError.dataCorruptedError(
-                in: try decoder.singleValueContainer(),
+                in: container,
                 debugDescription: "校验和必须是 16 位十六进制字符串,实际得到:\(text)"
             )
         }

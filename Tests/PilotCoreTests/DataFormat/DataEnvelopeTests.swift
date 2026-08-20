@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import PilotCore
+import PilotTestSupport
 
 @Suite("DataEnvelope")
 struct DataEnvelopeTests {
@@ -56,6 +57,22 @@ struct DataEnvelopeTests {
         let decoded = try CanonicalJSON.makeDecoder().decode(DataEnvelope<Payload>.self, from: first)
         let second = try encoder.encode(decoded)
         #expect(first == second)
+    }
+
+    @Test("复用同一个 encoder 实例仍然字节稳定")
+    func reusedEncoderStaysStable() throws {
+        // 这条是审查发现的:不加 .sortedKeys 时,**复用同一个 encoder 实例**
+        // 连续编码同一份数据,每次字节都不同(实测 8 次 8 种)。
+        // 而「建一次 encoder 反复用」恰好是最自然的用法。
+        //
+        // 工厂方法每次返回新实例,但保证不能建立在那上面 —— 调用方完全可以
+        // 自己持有一个反复用。真正的保证来自 .sortedKeys,这条测试盯的就是它。
+        let encoder = CanonicalJSON.makeSnapshotEncoder()
+        let envelope = makeEnvelope()
+        let first = try encoder.encode(envelope)
+        for _ in 0..<8 {
+            #expect(try encoder.encode(envelope) == first)
+        }
     }
 
     @Test("键按字典序输出")
@@ -127,9 +144,11 @@ struct DataEnvelopeTests {
         {"schemaVersion":1,"revision":3,"lastEventSequence":-1,"createdAt":0,
          "updatedAt":0,"checksum":"0123456789abcdef","payload":{"count":1,"name":"x"}}
         """
-        #expect(throws: DecodingError.self) {
-            try CanonicalJSON.makeDecoder().decode(DataEnvelope<Payload>.self, from: Data(bad.utf8))
-        }
+        // 收紧到具体分支:值非法是 .dataCorrupted,与「字段缺了」「类型不对」
+        // 对应完全不同的用户可见信息,不能混为一谈。
+        #expect(decodingErrorKind {
+            _ = try CanonicalJSON.makeDecoder().decode(DataEnvelope<Payload>.self, from: Data(bad.utf8))
+        } == .dataCorrupted)
     }
 
     @Test("缺少必需字段时解码失败,而不是当作默认值")
@@ -139,9 +158,9 @@ struct DataEnvelopeTests {
         {"schemaVersion":1,"revision":3,"createdAt":0,
          "updatedAt":0,"checksum":"0123456789abcdef","payload":{"count":1,"name":"x"}}
         """
-        #expect(throws: DecodingError.self) {
-            try CanonicalJSON.makeDecoder().decode(DataEnvelope<Payload>.self, from: Data(bad.utf8))
-        }
+        #expect(decodingErrorKind {
+            _ = try CanonicalJSON.makeDecoder().decode(DataEnvelope<Payload>.self, from: Data(bad.utf8))
+        } == .keyNotFound)
     }
 
     @Test("payload 结构不符时解码失败")
@@ -150,8 +169,8 @@ struct DataEnvelopeTests {
         {"schemaVersion":1,"revision":3,"lastEventSequence":0,"createdAt":0,
          "updatedAt":0,"checksum":"0123456789abcdef","payload":{"count":"不是数字","name":"x"}}
         """
-        #expect(throws: DecodingError.self) {
-            try CanonicalJSON.makeDecoder().decode(DataEnvelope<Payload>.self, from: Data(bad.utf8))
-        }
+        #expect(decodingErrorKind {
+            _ = try CanonicalJSON.makeDecoder().decode(DataEnvelope<Payload>.self, from: Data(bad.utf8))
+        } == .typeMismatch)
     }
 }

@@ -27,10 +27,11 @@ public struct SchemaVersion: Sendable, Hashable, Comparable, Codable, CustomStri
     public var description: String { "v\(rawValue)" }
 
     public init(from decoder: any Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(Int.self)
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(Int.self)
         guard raw >= 1 else {
             throw DecodingError.dataCorruptedError(
-                in: try decoder.singleValueContainer(),
+                in: container,
                 debugDescription: "schemaVersion 必须 >= 1,实际读到:\(raw)"
             )
         }
@@ -68,10 +69,11 @@ public struct Revision: Sendable, Hashable, Comparable, Codable, CustomStringCon
     public var description: String { "r\(rawValue)" }
 
     public init(from decoder: any Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(Int64.self)
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(Int64.self)
         guard raw >= 0 else {
             throw DecodingError.dataCorruptedError(
-                in: try decoder.singleValueContainer(),
+                in: container,
                 debugDescription: "revision 不能为负,实际读到:\(raw)"
             )
         }
