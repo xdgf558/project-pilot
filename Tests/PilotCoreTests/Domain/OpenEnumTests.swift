@@ -60,20 +60,42 @@ struct OpenEnumTests {
         } == .typeMismatch)
     }
 
-    @Test("上游枚举的 raw value 写死", arguments: [
-        ("PullRequestState", ["OPEN", "CLOSED", "MERGED"]),
-        ("MergeableState", ["MERGEABLE", "CONFLICTING", "UNKNOWN"]),
-        ("ReviewSourceUnused", []),
+    @Test("六个上游枚举的 raw value 全部写死")
+    func rawValuesArePinned() {
+        // 这些是和 GitHub 的接口约定。**拼错了不会报错**,只会让那个取值
+        // 永远落进「未知」分支 —— 系统看起来在工作,判断却一直是错的。
+        // 这是开放枚举的代价:它对未知值宽容,所以拼写错误不会浮出来。
+        //
+        // 原来这条是个参数化测试,其中一个条目落到 default: break ——
+        // 一个 #expect 都没有,永远不可能红。空断言比没有断言更坏,
+        // 因为它看起来像覆盖了。改成逐个直写。
+        #expect(Set(PullRequestState.allCases.map(\.rawValue))
+                == ["OPEN", "CLOSED", "MERGED"])
+        #expect(Set(MergeableState.allCases.map(\.rawValue))
+                == ["MERGEABLE", "CONFLICTING", "UNKNOWN"])
+        #expect(Set(MergeStateStatus.allCases.map(\.rawValue))
+                == ["BEHIND", "BLOCKED", "CLEAN", "DIRTY", "DRAFT",
+                    "HAS_HOOKS", "UNSTABLE", "UNKNOWN"])
+        #expect(Set(ReviewDecision.allCases.map(\.rawValue))
+                == ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", ""])
+        #expect(Set(CheckStatus.allCases.map(\.rawValue))
+                == ["QUEUED", "IN_PROGRESS", "COMPLETED", "WAITING", "PENDING", "REQUESTED"])
+        #expect(Set(CheckConclusion.allCases.map(\.rawValue))
+                == ["SUCCESS", "FAILURE", "NEUTRAL", "CANCELLED", "TIMED_OUT",
+                    "ACTION_REQUIRED", "SKIPPED", "STALE", "STARTUP_FAILURE"])
+    }
+
+    @Test("每个上游枚举都能吞下未知值", arguments: [
+        "SOMETHING_NEW", "", "lowercase", "带中文的值",
     ])
-    func rawValuesArePinned(_ name: String, _ expected: [String]) {
-        // 这些是和 GitHub 的接口约定,拼错了不会报错,只会永远判成「未知」。
-        switch name {
-        case "PullRequestState":
-            #expect(Set(PullRequestState.allCases.map(\.rawValue)) == Set(expected))
-        case "MergeableState":
-            #expect(Set(MergeableState.allCases.map(\.rawValue)) == Set(expected))
-        default:
-            break
-        }
+    func everyUpstreamEnumTolerates(_ raw: String) {
+        // 逐个确认,不是只对某一个成立 —— 漏掉一个,GitHub 在那个字段上
+        // 新增取值时,已经存下来的快照就读不出来了。
+        #expect(OpenEnum<PullRequestState>(rawValue: raw).rawValue == raw)
+        #expect(OpenEnum<MergeableState>(rawValue: raw).rawValue == raw)
+        #expect(OpenEnum<MergeStateStatus>(rawValue: raw).rawValue == raw)
+        #expect(OpenEnum<ReviewDecision>(rawValue: raw).rawValue == raw)
+        #expect(OpenEnum<CheckStatus>(rawValue: raw).rawValue == raw)
+        #expect(OpenEnum<CheckConclusion>(rawValue: raw).rawValue == raw)
     }
 }
