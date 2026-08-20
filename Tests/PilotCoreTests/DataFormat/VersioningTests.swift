@@ -41,6 +41,22 @@ struct VersioningTests {
         #expect(Revision(2) == Revision(2))
     }
 
+    @Test("版本号是字符串时报类型不符")
+    func rejectsStringVersion() {
+        // 正交对照:如果实现把所有失败都返回成 dataCorrupted,
+        // 上面那条「小于 1 报 dataCorrupted」照样绿,收紧等于没收紧。
+        #expect(decodingErrorKind {
+            _ = try JSONDecoder().decode(SchemaVersion.self, from: Data("\"1\"".utf8))
+        } == .typeMismatch)
+    }
+
+    @Test("revision 是字符串时报类型不符")
+    func rejectsStringRevision() {
+        #expect(decodingErrorKind {
+            _ = try JSONDecoder().decode(Revision.self, from: Data("\"5\"".utf8))
+        } == .typeMismatch)
+    }
+
     @Test("负 revision 解码失败")
     func rejectsNegativeRevision() {
         #expect(decodingErrorKind {
