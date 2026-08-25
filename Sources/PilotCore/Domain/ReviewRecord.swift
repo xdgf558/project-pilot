@@ -143,11 +143,20 @@ public struct ReviewRecord: Sendable, Hashable, Codable, Identifiable {
     /// 覆盖是否完整。
     public var hasFullCoverage: Bool { unreviewedFiles.isEmpty }
 
+    /// 是否有标记为阻止合并的发现。
+    public var hasBlockingFindings: Bool { findings.contains(where: \.isBlocking) }
+
     /// 这条记录能否用于满足本地合并闸门。
     ///
-    /// 三个条件缺一不可:结论是 approved、覆盖完整、相对当前 head 未失效。
+    /// **四个条件缺一不可:**结论是 approved、没有阻断项、覆盖完整、
+    /// 相对当前 head 未失效。
+    ///
+    /// 「结论是 approved 但带着阻断项」不是一种可以放行的状态,而是自相矛盾 ——
+    /// `isBlocking` 的定义就是「阻止合并」。允许它通过,等于让审查者
+    /// 一边说「这里有问题不能合」一边把门打开。
     public func canSatisfyMergeGate(currentHeadSHA: String) -> Bool {
         verdict.canSatisfyMergeGate
+            && !hasBlockingFindings
             && hasFullCoverage
             && !isStale(currentHeadSHA: currentHeadSHA)
     }

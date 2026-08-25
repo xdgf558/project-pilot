@@ -154,6 +154,12 @@ public struct Job: Sendable, Hashable, Codable, Identifiable {
     ) {
         precondition(attempt >= 1, "attempt 从 1 起,收到:\(attempt)")
         precondition(!branchName.isEmpty, "作业必须有分支名")
+        if let pid = processId {
+            // POSIX 里 0 和负数不是「某个进程」:kill(0, …) 打整个进程组,
+            // kill(-1, …) 打当前用户能打的所有进程。存下这种值,
+            // 后面的取消或收尸就可能把自己或别人一起带走。
+            precondition(pid > 0, "进程号必须为正,收到:\(pid)")
+        }
         self.id = id
         self.projectId = projectId
         self.taskId = taskId
@@ -180,9 +186,17 @@ public struct Job: Sendable, Hashable, Codable, Identifiable {
 
     /// 进程身份是否完整到可以安全地对它下手(取消、收尸)。
     ///
+    /// 三个条件:PID 在、PID 是正数、身份在。
+    ///
     /// 只有 PID 没有身份时**不能杀** —— 那个 PID 可能已经属于别人了。
+    /// PID 非正时更不能碰 —— POSIX 里 0 打整个进程组、负数打一批进程。
+    ///
+    /// 正数检查在构造和解码时已经做过,这里再做一次是有意的**纵深防御**:
+    /// 这个属性是「可以下手了」的唯一闸门,它答错的代价是杀掉无关进程,
+    /// 而多一次比较的代价是零。
     public var hasVerifiableProcessIdentity: Bool {
-        processId != nil && processStartIdentity != nil
+        guard let pid = processId, pid > 0 else { return false }
+        return processStartIdentity != nil
     }
 
     public init(from decoder: any Decoder) throws {
@@ -220,6 +234,12 @@ public struct Job: Sendable, Hashable, Codable, Identifiable {
             throw DecodingError.dataCorruptedError(
                 forKey: .branchName, in: container,
                 debugDescription: "作业必须有分支名"
+            )
+        }
+        if let pid = processId, pid <= 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: .processId, in: container,
+                debugDescription: "进程号必须为正(0 和负数在 POSIX 里指进程组),实际读到:\(pid)"
             )
         }
     }

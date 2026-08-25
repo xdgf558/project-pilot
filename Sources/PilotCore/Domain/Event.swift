@@ -33,6 +33,10 @@ public struct EventType: Sendable, Hashable, Codable, RawRepresentable, CustomSt
     public let rawValue: String
 
     public init(rawValue: String) {
+        // 解码器拒绝空串,构造器就必须也拒绝 —— 否则可以造出一条
+        // **写得出去、读不回来**的事件,而事件日志的全部价值在于可恢复。
+        // 构造与解码的校验必须对称。
+        precondition(!rawValue.isEmpty, "事件类型不能是空串")
         self.rawValue = rawValue
     }
 

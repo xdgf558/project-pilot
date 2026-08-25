@@ -11,7 +11,8 @@ struct ReviewRecordTests {
     private func makeRecord(
         verdict: ReviewVerdict = .approved,
         source: ReviewSource = .automated,
-        unreviewedFiles: [String] = []
+        unreviewedFiles: [String] = [],
+        blocking: Bool = false
     ) -> ReviewRecord {
         ReviewRecord(
             id: UUID(sequenceNumber: 1),
@@ -21,9 +22,12 @@ struct ReviewRecordTests {
             source: source,
             headSHA: headSHA,
             baseSHA: "c300c19aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            // 默认不带阻断项。原来这里默认 isBlocking: true,而下面又断言
+            // 它能过闸门 —— 等于把「approved 带着阻断项也放行」这个缺陷
+            // 固定进了测试。夹具本身就是断言的一部分,不能随手写。
             findings: [
                 ReviewFinding(file: "Sources/X.swift", line: 42,
-                              message: "这里没有处理空数组", isBlocking: true)
+                              message: "这里没有处理空数组", isBlocking: blocking)
             ],
             reviewedFiles: ["Sources/X.swift", "Tests/XTests.swift"],
             unreviewedFiles: unreviewedFiles,
@@ -87,6 +91,24 @@ struct ReviewRecordTests {
         // 若它能满足闸门,自审就等于绕过了审查。
         #expect(makeRecord(verdict: verdict).canSatisfyMergeGate(currentHeadSHA: headSHA) == false)
         #expect(verdict.canSatisfyMergeGate == false)
+    }
+
+    @Test("有阻断项就不行")
+    func blockingFindingCannotSatisfy() {
+        // 「结论是 approved 但带着阻断项」不是可以放行的状态,是自相矛盾 ——
+        // isBlocking 的定义就是「阻止合并」。允许它通过,等于让审查者
+        // 一边说「这里有问题不能合」一边把门打开。
+        let record = makeRecord(blocking: true)
+        #expect(record.hasBlockingFindings)
+        #expect(record.canSatisfyMergeGate(currentHeadSHA: headSHA) == false)
+    }
+
+    @Test("非阻断的发现不影响放行")
+    func advisoryFindingIsFine() {
+        // 留了意见但不阻止合并,是正常的 approve。
+        let record = makeRecord(blocking: false)
+        #expect(record.hasBlockingFindings == false)
+        #expect(record.canSatisfyMergeGate(currentHeadSHA: headSHA))
     }
 
     @Test("有未审查文件就不行")
