@@ -128,31 +128,144 @@ struct ValidationSymmetryTests {
         } == .dataCorrupted)
     }
 
-    @Test("纵深防御:字段被改成非正数后,闸门仍然拒绝")
-    func mutatedPIDIsNotVerifiable() {
-        // 构造器和解码器都会拦下非正的 PID,所以要走到这个分支,
-        // 只能靠事后改字段 —— 而 processId 是 var,任何持有者都能改。
-        //
-        // 这正是纵深防御要防的:某条路径(现在的、或将来新加的)产生了
-        // 一个坏 PID,而「可以下手了」这个闸门自己必须再判一次。
-        // 它答错的代价是杀掉无关进程,多一次比较的代价是零。
+    // MARK: - 改字段之后仍然写得出读得回
+    //
+    // 起因:`Job.processId` 等字段原本是 public var,构造器和解码器都校验了,
+    // 但**对象造出来之后还能直接写进非法值** —— 合成的 Encodable 照单全收,
+    // 自定义解码器却拒绝。于是能产生「写得出去、读不回来」的权威快照。
+    //
+    // 实测当时有七处这样的洞:Job 的 processId 与 branchName、
+    // ReviewFinding.message、PilotTask 的 title 与 pullRequestNumber、
+    // Project 的 name 与 projectConcurrency。
+    //
+    // 修法是让非法状态**在编译期就写不出来**:不变的字段改 let,
+    // 会变的改 private(set) 并配一个校验过的方法。
+    // 下面这些用例守的是「合法的改动仍然能往返」——
+    // 非法的那一半现在由编译器拦,写不出测试来。
+
+    private func assertRoundTrips<T: Codable & Equatable>(_ value: T, _ label: Comment) throws {
+        let data = try CanonicalJSON.makeSnapshotEncoder().encode(value)
+        #expect(try CanonicalJSON.makeDecoder().decode(T.self, from: data) == value, label)
+    }
+
+    @Test("attachProcess 之后仍可往返")
+    func attachProcessRoundTrips() throws {
         var job = Job(id: UUID(sequenceNumber: 1), projectId: UUID(sequenceNumber: 2),
                       taskId: UUID(sequenceNumber: 3), executor: .codex,
                       executorVersion: "1", authMode: .external,
                       worktreePath: URL(fileURLWithPath: "/tmp"), branchName: "b",
-                      processId: 42,
-                      processStartIdentity: ProcessStartIdentity(rawValue: "x"),
-                      status: .running)
+                      status: .starting)
+        job.attachProcess(id: 71439, identity: ProcessStartIdentity(rawValue: "1787196028.492046"))
         #expect(job.hasVerifiableProcessIdentity)
+        try assertRoundTrips(job, "attach 之后")
 
-        job.processId = 0
-        #expect(job.hasVerifiableProcessIdentity == false, "PID 0 在 POSIX 里是整个进程组")
+        job.detachProcess()
+        // 两个字段必须一起清 —— 只清一个会留下「有 PID 没身份」这种危险状态。
+        #expect(job.processId == nil)
+        #expect(job.processStartIdentity == nil)
+        #expect(job.hasVerifiableProcessIdentity == false)
+        try assertRoundTrips(job, "detach 之后")
+    }
 
-        job.processId = -1
-        #expect(job.hasVerifiableProcessIdentity == false, "负 PID 在 POSIX 里是一批进程")
+    @Test("取不到进程身份时也能记录,但不算可核验")
+    func attachWithoutIdentity() throws {
+        // 取身份可能失败(sysctl 出错)。那种情况必须能被记录下来,
+        // 而不是假装没有进程 —— 但也绝不能被当成可以下手。
+        var job = Job(id: UUID(sequenceNumber: 1), projectId: UUID(sequenceNumber: 2),
+                      taskId: UUID(sequenceNumber: 3), executor: .codex,
+                      executorVersion: "1", authMode: .external,
+                      worktreePath: URL(fileURLWithPath: "/tmp"), branchName: "b",
+                      status: .starting)
+        job.attachProcess(id: 71439, identity: nil)
+        #expect(job.processId == 71439)
+        #expect(job.hasVerifiableProcessIdentity == false)
+        try assertRoundTrips(job, "有 PID 无身份")
+    }
 
-        job.processId = 42
-        job.processStartIdentity = nil
-        #expect(job.hasVerifiableProcessIdentity == false, "没有身份时 PID 可能已属于别人")
+    @Test("attachProcess 拒绝进程号 0")
+    func attachRejectsZero() async {
+        await #expect(processExitsWith: .failure) {
+            var job = Job(id: UUID(), projectId: UUID(), taskId: UUID(),
+                          executor: .codex, executorVersion: "1", authMode: .external,
+                          worktreePath: URL(fileURLWithPath: "/tmp"), branchName: "b")
+            job.attachProcess(id: 0, identity: nil)
+        }
+    }
+
+    @Test("改标题后仍可往返")
+    func renameTaskRoundTrips() throws {
+        var task = PilotTask(id: UUID(sequenceNumber: 1), projectId: UUID(sequenceNumber: 2),
+                             displayNumber: 1, title: "旧标题", type: .code,
+                             completionPolicy: .mergedPR,
+                             createdAt: Date(timeIntervalSince1970: 0),
+                             updatedAt: Date(timeIntervalSince1970: 0))
+        task.rename(to: "新标题")
+        #expect(task.title == "新标题")
+        try assertRoundTrips(task, "改名之后")
+    }
+
+    @Test("rename 拒绝空标题")
+    func renameRejectsEmpty() async {
+        await #expect(processExitsWith: .failure) {
+            var task = PilotTask(id: UUID(), projectId: UUID(), displayNumber: 1,
+                                 title: "t", type: .code, completionPolicy: .mergedPR,
+                                 createdAt: Date(), updatedAt: Date())
+            task.rename(to: "")
+        }
+    }
+
+    @Test("绑定与解绑 PR 后仍可往返")
+    func bindPullRequestRoundTrips() throws {
+        var task = PilotTask(id: UUID(sequenceNumber: 1), projectId: UUID(sequenceNumber: 2),
+                             displayNumber: 1, title: "t", type: .code,
+                             completionPolicy: .mergedPR,
+                             createdAt: Date(timeIntervalSince1970: 0),
+                             updatedAt: Date(timeIntervalSince1970: 0))
+        task.bindPullRequest(number: 42)
+        #expect(task.pullRequestNumber == 42)
+        try assertRoundTrips(task, "绑定之后")
+
+        task.unbindPullRequest()
+        #expect(task.pullRequestNumber == nil)
+        try assertRoundTrips(task, "解绑之后")
+    }
+
+    @Test("bindPullRequest 拒绝 0")
+    func bindRejectsZero() async {
+        await #expect(processExitsWith: .failure) {
+            var task = PilotTask(id: UUID(), projectId: UUID(), displayNumber: 1,
+                                 title: "t", type: .code, completionPolicy: .mergedPR,
+                                 createdAt: Date(), updatedAt: Date())
+            task.bindPullRequest(number: 0)
+        }
+    }
+
+    @Test("改项目名与并发上限后仍可往返")
+    func projectMutationsRoundTrip() throws {
+        var project = Project(id: UUID(sequenceNumber: 1), name: "旧名",
+                              repositoryPath: URL(fileURLWithPath: "/tmp"),
+                              remoteHost: "github.com", owner: "o", repository: "r",
+                              defaultBranch: "main", repositoryPolicy: .personal,
+                              createdAt: Date(timeIntervalSince1970: 0),
+                              updatedAt: Date(timeIntervalSince1970: 0))
+        project.rename(to: "新名")
+        project.setConcurrency(3)
+        #expect(project.name == "新名")
+        #expect(project.projectConcurrency == 3)
+        try assertRoundTrips(project, "改动之后")
+    }
+
+    @Test("setConcurrency 拒绝 0")
+    func setConcurrencyRejectsZero() async {
+        // 想让项目停下来用暂停,不是把上限设成 0 ——
+        // 那样「暂停了」和「配置错了」在数据上分不开。
+        await #expect(processExitsWith: .failure) {
+            var project = Project(id: UUID(), name: "n",
+                                  repositoryPath: URL(fileURLWithPath: "/tmp"),
+                                  remoteHost: "github.com", owner: "o", repository: "r",
+                                  defaultBranch: "main", repositoryPolicy: .personal,
+                                  createdAt: Date(), updatedAt: Date())
+            project.setConcurrency(0)
+        }
     }
 }

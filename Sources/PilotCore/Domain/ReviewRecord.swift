@@ -39,12 +39,14 @@ public enum ReviewSource: String, Sendable, Hashable, Codable, CaseIterable {
 /// `isBlocking` 给合并闸门判断(P5-06)。不发明严重度分级 ——
 /// 那会在没有消费方的情况下先固化一套分类。
 public struct ReviewFinding: Sendable, Hashable, Codable {
+    // 一条发现是一条记录,写下来就不改了 —— 需要更正就重新审一遍。
+    // 做成 let 顺带堵住「改成空 message 之后写得出读不回」。
     /// 相对仓库根的路径。跨文件的问题为 nil。
-    public var file: String?
-    public var line: Int?
-    public var message: String
+    public let file: String?
+    public let line: Int?
+    public let message: String
     /// 是否阻止合并。
-    public var isBlocking: Bool
+    public let isBlocking: Bool
 
     public init(file: String? = nil, line: Int? = nil, message: String, isBlocking: Bool) {
         precondition(!message.isEmpty, "审查发现必须有说明")

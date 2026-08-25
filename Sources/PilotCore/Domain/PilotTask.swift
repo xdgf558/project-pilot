@@ -21,7 +21,9 @@ public struct PilotTask: Sendable, Hashable, Codable, Identifiable {
     public let displayNumber: Int
     public let createdAt: Date
 
-    public var title: String
+    /// 只能通过 `rename(to:)` 改 —— 它有「非空」这个不变量,
+    /// 而一个能被改成空串的字段等于没有不变量。
+    public private(set) var title: String
     public var description: String
     /// 可验证的验收标准。空数组是允许的,但 P10-04 会把「缺少验收标准」
     /// 当成任务质量问题报出来。
@@ -36,7 +38,8 @@ public struct PilotTask: Sendable, Hashable, Codable, Identifiable {
     public var priority: Int
     public var executorPreference: ExecutorPreference?
     public var activeJobId: UUID?
-    public var pullRequestNumber: Int?
+    /// 只能通过 `bindPullRequest` / `unbindPullRequest` 改。
+    public private(set) var pullRequestNumber: Int?
     public var updatedAt: Date
 
     public init(
@@ -80,6 +83,27 @@ public struct PilotTask: Sendable, Hashable, Codable, Identifiable {
         self.pullRequestNumber = pullRequestNumber
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    /// 改标题。
+    ///
+    /// 用 `precondition` 而不是抛错,是为了和构造器保持一致 ——
+    /// 同一条不变量,同一种强制方式。调用方(命令层、界面)负责在把空标题
+    /// 递进来之前就挡住,那是它该做的校验。
+    public mutating func rename(to newTitle: String) {
+        precondition(!newTitle.isEmpty, "任务标题不能为空")
+        title = newTitle
+    }
+
+    /// 绑定一个 PR。
+    public mutating func bindPullRequest(number: Int) {
+        precondition(number >= 1, "PR 编号从 1 起,收到:\(number)")
+        pullRequestNumber = number
+    }
+
+    /// 解绑 PR。
+    public mutating func unbindPullRequest() {
+        pullRequestNumber = nil
     }
 
     public init(from decoder: any Decoder) throws {

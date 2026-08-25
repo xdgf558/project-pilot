@@ -29,7 +29,8 @@ public struct Project: Sendable, Hashable, Codable, Identifiable {
     public let id: UUID
     public let createdAt: Date
 
-    public var name: String
+    /// 只能通过 `rename(to:)` 改。
+    public private(set) var name: String
     /// 规范化后的本地仓库路径。
     public var repositoryPath: URL
     /// 远端主机。
@@ -49,7 +50,7 @@ public struct Project: Sendable, Hashable, Codable, Identifiable {
     ///
     /// 必须 >= 1。想让项目停下来用暂停,不是把上限设成 0 ——
     /// 那样「暂停了」和「配置错了」在数据上分不开。
-    public var projectConcurrency: Int
+    public private(set) var projectConcurrency: Int
     public var repositoryPolicy: RepositoryPolicy
     public var updatedAt: Date
 
@@ -87,6 +88,21 @@ public struct Project: Sendable, Hashable, Codable, Identifiable {
 
     /// 用户是否已确认信任这个仓库。
     public var isTrusted: Bool { trustedAt != nil }
+
+    /// 改项目名。与构造器同一条不变量,同一种强制方式。
+    public mutating func rename(to newName: String) {
+        precondition(!newName.isEmpty, "项目名不能为空")
+        name = newName
+    }
+
+    /// 改项目内并发上限。
+    ///
+    /// 想让项目停下来用暂停,不是把上限设成 0 ——
+    /// 那样「暂停了」和「配置错了」在数据上分不开。
+    public mutating func setConcurrency(_ limit: Int) {
+        precondition(limit >= 1, "项目并发上限必须 >= 1,收到:\(limit)")
+        projectConcurrency = limit
+    }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)

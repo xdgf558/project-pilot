@@ -103,14 +103,19 @@ public struct Job: Sendable, Hashable, Codable, Identifiable {
     public var model: String?
     public var authMode: AuthMode
     public var worktreePath: URL
-    public var branchName: String
+    /// 分支名在派工时定下,之后不变。做成 `let` 是因为它有「非空」这个不变量,
+    /// 而一个可以被改成空串的字段等于没有不变量 —— 改完照样能编码,
+    /// 只是下次读不回来。
+    public let branchName: String
 
     /// 进程号。派工前和收尸后为 nil。
     ///
     /// **单独看它不足以识别进程** —— 系统会重用 PID。必须和
     /// `processStartIdentity` 一起用,否则可能杀掉一个无关的进程(v0.2 §2.5)。
-    public var processId: Int32?
-    public var processStartIdentity: ProcessStartIdentity?
+    ///
+    /// 只能通过 `attachProcess` / `detachProcess` 改。理由见那两个方法。
+    public private(set) var processId: Int32?
+    public private(set) var processStartIdentity: ProcessStartIdentity?
 
     public var status: JobStatus
     public var startedAt: Date?
@@ -184,6 +189,27 @@ public struct Job: Sendable, Hashable, Codable, Identifiable {
         self.failureMessage = failureMessage
     }
 
+    /// 记录进程已经起来了。
+    ///
+    /// 两个字段一起写,不单独暴露 setter。原因是它们有跨字段的约束:
+    /// 只有 PID 没有身份是危险状态(那个 PID 可能已属于别人),
+    /// 而分开的 setter 会让这个中间状态在两次赋值之间必然出现。
+    ///
+    /// `identity` 允许为 nil —— 取身份可能失败(sysctl 出错),
+    /// 那种情况必须能被记录下来,由 `hasVerifiableProcessIdentity` 判定为不可下手。
+    public mutating func attachProcess(id: Int32, identity: ProcessStartIdentity?) {
+        // 与构造器同一条不变量,同一种强制方式。
+        precondition(id > 0, "进程号必须为正,收到:\(id)")
+        processId = id
+        processStartIdentity = identity
+    }
+
+    /// 进程已经结束或已收尸,清掉身份。
+    public mutating func detachProcess() {
+        processId = nil
+        processStartIdentity = nil
+    }
+
     /// 进程身份是否完整到可以安全地对它下手(取消、收尸)。
     ///
     /// 三个条件:PID 在、PID 是正数、身份在。
@@ -191,9 +217,13 @@ public struct Job: Sendable, Hashable, Codable, Identifiable {
     /// 只有 PID 没有身份时**不能杀** —— 那个 PID 可能已经属于别人了。
     /// PID 非正时更不能碰 —— POSIX 里 0 打整个进程组、负数打一批进程。
     ///
-    /// 正数检查在构造和解码时已经做过,这里再做一次是有意的**纵深防御**:
-    /// 这个属性是「可以下手了」的唯一闸门,它答错的代价是杀掉无关进程,
-    /// 而多一次比较的代价是零。
+    /// 正数检查在构造、解码和 `attachProcess` 三处都做过,这里再做一次
+    /// 是有意的纵深防御。
+    ///
+    /// **诚实说明:自 `processId` 改为 `private(set)` 之后,这个分支从模块外
+    /// 已经无法触达,因此没有测试覆盖它。** 留着的理由是本文件内部仍能直接
+    /// 赋值(`private` 的作用域是本文件),将来若在同一文件里加了 reducer,
+    /// 这行是最后一道拦。代价是一次比较。
     public var hasVerifiableProcessIdentity: Bool {
         guard let pid = processId, pid > 0 else { return false }
         return processStartIdentity != nil
