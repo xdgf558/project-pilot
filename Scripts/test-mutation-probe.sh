@@ -162,6 +162,24 @@ else
 fi
 
 echo
+echo "不能改坏文件权限"
+EXEC_TARGET="$WORK/executable.sh"
+printf '#!/bin/bash\necho hi\n' > "$EXEC_TARGET"
+chmod +x "$EXEC_TARGET"
+before_mode=$(stat -f '%p' "$EXEC_TARGET")
+export MUTATION_PROBE_BUILD="$BUILD_OK" MUTATION_PROBE_TEST="$TEST_FAIL"
+"$PROBE" "$EXEC_TARGET" "hi" "bye" "权限" >/dev/null 2>&1
+after_mode=$(stat -f '%p' "$EXEC_TARGET")
+if [ "$before_mode" = "$after_mode" ] && [ -x "$EXEC_TARGET" ]; then
+    printf '  \033[32m✓\033[0m 探测可执行文件后权限位不变\n'; pass=$((pass + 1))
+else
+    # 变异走的是「写临时文件 + os.replace」,而临时文件带的是默认权限。
+    # 不把原权限带过去,脚本探完就不能执行了 —— 下游看到的是「退出码 126」
+    # 这种和被测内容毫无关系的失败,极难往权限上想。
+    printf '  \033[31m✗\033[0m 权限被改坏:%s → %s\n' "$before_mode" "$after_mode"; fail=$((fail + 1))
+fi
+
+echo
 echo "被中断时不能损坏源文件"
 SLOW_BUILD="$WORK/slow-build"; printf '#!/bin/bash\nsleep 30\n' > "$SLOW_BUILD"; chmod +x "$SLOW_BUILD"
 export MUTATION_PROBE_BUILD="$SLOW_BUILD" MUTATION_PROBE_TEST="$TEST_PASS"

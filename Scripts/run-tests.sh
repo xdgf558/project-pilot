@@ -39,15 +39,36 @@ if [ ${#xml[@]} -eq 0 ]; then
     exit 1
 fi
 
+# 数 <testcase> 元素,不是读 <testsuite> 的 tests= 属性。
+#
+# 原来的写法是 `sed …tests="…"… | head -1`,只取**第一个** testsuite 的计数。
+# Swift 6.3.3 下一个文件只有一个 testsuite,恰好对;Swift 6.4 改成每个
+# test target 一个 testsuite —— 于是 185 个测试被报成 30 个,而断言
+# 只查 `> 0`,静默放过。
+#
+# 数 testcase 不依赖 tests= 属性存不存在、对不对,是更根本的事实。
 total=0
 for file in "${xml[@]}"; do
-    count=$(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' "$file" | head -1)
-    echo "  $file  tests=${count:-0}"
-    total=$((total + ${count:-0}))
+    count=$(grep -c '<testcase' "$file")
+    suites=$(grep -c '<testsuite ' "$file")
+    echo "  $file  testcase=$count(分布在 $suites 个 testsuite)"
+    total=$((total + count))
 done
 
 if [ "$total" -eq 0 ]; then
     echo "::error::$CONFIGURATION 配置的 xunit XML 存在但记录了 0 个测试。见 ADR-0003。"
+    exit 1
+fi
+
+# 交叉核对:运行器自己报了多少个测试,XML 里就该有多少条。
+#
+# 上面那个 bug 能溜过去,正是因为断言只查 `> 0` —— 少报 155 个也算「有」。
+# 拿运行器的输出当第二个信源,两边对不上就说明产出不完整。
+# Swift 6.4 会打多行 "Test run with N tests"(每个 target 一行),所以要加总。
+reported=$(grep -oE 'Test run with [0-9]+ test' "test-$CONFIGURATION.log" \
+    | grep -oE '[0-9]+' | paste -sd+ - | bc 2>/dev/null)
+if [ -n "$reported" ] && [ "$reported" -gt 0 ] && [ "$reported" -ne "$total" ]; then
+    echo "::error::$CONFIGURATION 配置的测试结果不完整:运行器报告 $reported 个测试,xunit XML 只记录了 $total 个。上游产出格式可能已变更,见 ADR-0003。"
     exit 1
 fi
 
