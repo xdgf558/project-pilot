@@ -16,8 +16,19 @@
 #
 # ── 版本固定(v0.2 §11 规则 8:不使用 latest 浮动版本)──
 #
-# runner 用 macos-26 而不是 macos-latest —— 后者会随 GitHub 的迁移窗口漂移。
-# macos-26 是 arm64 镜像,与开发机一致,也符合 v0.2 §0.3「v1 仅支持 Apple Silicon」。
+# runner 用 xcode-27 而不是 macos-latest。
+#
+# **这个镜像是 GitHub 标注的 preview,承载的是 Xcode 27 beta。** 选它是因为
+# 开发机已经换到了 Xcode 27,而 26.6 上的 Swift 6.3.3 与 27 上的 6.4 是
+# 两个编译器 —— 本地绿了 CI 未必绿,反过来也一样。
+#
+# 代价必须说清:
+#   镜像标注 preview,GitHub 原话是「some software can be unstable」
+#   beta 会轮换。轮换时下面写死的路径会消失,本工作流**硬失败**并列出
+#   镜像上实际有哪些 Xcode —— 那是有意的,升级要是主动决定(v0.2 §11 规则 8)
+#   preview 标签可能排队
+#
+# 见 ADR-0013。
 #
 # 第三方 action 锁到 commit SHA 而不是 @v7 —— tag 是会被移动的,只有 SHA 不会。
 # SHA 后面的注释写明对应版本,便于人读。更新由 Dependabot 提 PR,人工决定,
@@ -51,14 +62,14 @@ defaults:
 jobs:
   build-and-test:
     name: 构建与测试
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 20
 
     env:
       # 已验证的工具链。升级时改这两行,并按 v0.3 §4 的流程走:
       # 记录回滚点 → 升级 → 跑契约测试 → 绿则记 ADR,红则查哪条契约破了。
-      VERIFIED_XCODE_APP: /Applications/Xcode_26.6.app
-      VERIFIED_XCODE_BUILD: 17F113
+      VERIFIED_XCODE_APP: /Applications/Xcode_27_beta_4.app
+      VERIFIED_XCODE_BUILD: 27A5228h
 
     steps:
       - name: 检出
@@ -83,6 +94,9 @@ jobs:
 
           # 这份记录就是「已验证版本」的凭据。git 与 gh 的版本给 Phase 2 的
           # 契约测试(P2-10)做基线参考 —— 注意那是 CI 环境的版本,不等于开发机。
+          # 把工具链打成 annotation,不用翻 summary 就能在运行列表里看到。
+          # beta 轮换时这一行是最快的对照依据。
+          echo "::notice::$(xcodebuild -version | tr '\n' ' ')| $(swift --version 2>&1 | grep -oE 'Apple Swift version [0-9.]+ \(swiftlang-[0-9.]+')"
           {
             echo "## 工具链"
             echo '```'

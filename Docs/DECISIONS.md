@@ -709,3 +709,72 @@ Phase 10 落地时 `findings` 大概率要扩展。扩展比推翻便宜:
 
 若 P5-06 或 P8-04 实现时发现这三处不够用,以那里的实际需要为准修改,
 并更新本 ADR。
+
+---
+
+## ADR-0013:CI 跟随开发机换到 Xcode 27 beta
+
+**状态:** 已采纳(**带明确的已知风险**)
+**日期:** 2026-08-30
+**取代:** ADR-0006 里「CI 锁 Xcode 26.6 / build 17F113」那部分
+
+### 背景
+
+开发机上的 Xcode 26.6 在 2026-08-19 到 08-30 之间被换成了 Xcode 27 beta 6,
+旧的 Xcode 不再存在。同时 `xcode-select` 指向了 Command Line Tools ——
+而 CLT **不带 Swift Testing 模块**,本地 `swift test` 直接编译失败。
+
+这暴露的真问题不是那次误配置,而是:**本地是 Swift 6.4,CI 是 Swift 6.3.3。**
+两个编译器,本地绿了 CI 未必绿,反过来也一样。
+
+### 决策
+
+CI 从 `macos-26` 换到 `xcode-27` 镜像,锁定
+`/Applications/Xcode_27_beta_4.app`,build `27A5228h`。
+
+实测该镜像上 Swift 是 **6.4**(swiftlang-6.4.0.27.1),九条检查全过。
+
+### 这条决策违背了本项目自己的一条原则,记在这里
+
+v0.3 §4 的升级流程要求「记录当前版本 → 升级 → 跑契约测试 → 绿则更新已验证版本」,
+而 v0.2 §11 规则 8 要求「不使用 latest 之类的浮动版本」。
+
+**把一个 beta 当作已验证版本,与这两条的精神相悖。** beta 会轮换,
+「已验证」这个状态本身就不稳定。这一点在决策时被明确指出过,
+由用户拍板接受。
+
+选择的理由是:本地与 CI 用两个不同的编译器,风险比用 beta 更高更日常 ——
+它每一次提交都在起作用,而 beta 的不稳定是概率事件。
+
+### 已知风险,逐条
+
+**镜像是 preview。** GitHub 原话:「some software can be unstable on the
+new platform」,并且「there could be queueing issues」。
+
+**beta 会轮换,而且已经在路上。** runner-images 的 PR #14641
+(Xcode 27 → beta 6)已于 2026-08-27 合并,尚未铺开。铺开之后
+`/Applications/Xcode_27_beta_4.app` 会消失,本工作流**硬失败**,
+错误信息会列出镜像上实际有哪些 Xcode。
+
+这是有意的,不是缺陷 —— 升级必须是主动决定。修复是改一行路径加一行 build 号。
+
+**本地与 CI 仍有小差异。** 开发机是 beta 6(27A5252f,swiftlang-6.4.0.33.1),
+CI 是 beta 4(27A5228h,swiftlang-6.4.0.27.1)。主版本一致,补丁号不同。
+比 6.3.3 vs 6.4 小一个数量级,但不是零。
+
+### 回退条件
+
+出现下列任一情况,退回 `macos-26` + 某个 26.x 正式版,并把开发机也装回去:
+
+- preview 镜像的排队严重影响反馈速度
+- beta 轮换导致 CI 频繁硬失败,而每次都只是重新确认「还能编」
+- Xcode 27 正式版发布(那时应当锁正式版,不再用 beta)
+
+### 本地怎么修
+
+开发机的 `xcode-select` 指向 CLT 会让 `swift test` 报
+`no such module 'Testing'`。修复:
+
+```
+sudo xcode-select -s /Applications/Xcode-27-beta-6.app
+```
