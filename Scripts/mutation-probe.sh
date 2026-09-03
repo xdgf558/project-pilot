@@ -47,7 +47,9 @@ STAGING=""
 
 restore() {
     if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
-        cp -f "$BACKUP" "$TARGET"
+        # -p 保留备份的权限位。不加 -p 的话,cp 写进一个已存在的文件时
+        # 保留的是**目标**当前的权限 —— 而那正是可能已经被改坏的那个。
+        cp -pf "$BACKUP" "$TARGET"
         rm -f "$BACKUP"
         BACKUP=""
     fi
@@ -151,6 +153,11 @@ for _ in range(nth):
 # 这和 P0-06 里 SystemFileSystem.replaceItem 要解决的是同一个问题。
 temporary = path + ".mutation-probe-tmp"
 io.open(temporary, "w", encoding="utf-8").write(text[:index] + new + text[index + len(old):])
+# 把原文件的权限位带过去。os.replace 换的是**新建的**临时文件,
+# 它带的是默认权限 —— 直接替换会把可执行位丢掉。
+# 探针探脚本时这一点是致命的:内容对了,文件却不能执行了,
+# 而下游看到的是「退出码 126」这种和被测内容毫无关系的失败。
+os.chmod(temporary, os.stat(path).st_mode)
 os.replace(temporary, path)
 ' "$TARGET" "$wanted"; then
     bad "变异" "施加失败 —— 探针没跑成,不能据此得出任何结论"
