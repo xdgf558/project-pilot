@@ -801,3 +801,76 @@ CI 是 beta 4(27A5228h,swiftlang-6.4.0.27.1)。主版本一致,补丁号不同�
 ```
 sudo xcode-select -s /Applications/Xcode-27-beta-6.app
 ```
+
+---
+
+## ADR-0014:状态转换表在 v0.2 §2.3 原文缺席下的最小形状
+
+**状态:** 已采纳(转换表形状经项目所有者 2026-09-03 三选一确认)
+**日期:** 2026-09-03
+**偏离:** P1-03 工作包原文与 v0.2 §2.3 的转换表均不在仓库内,无从对照
+**工作包:** P1-03
+
+### 背景
+
+P1-03 要求「状态转换 reducer」。仓库内关于转换规则的证据只有:
+
+- 终态不可离开(TaskStage / JobStatus 各自的 `isTerminal` 文档,P5-12 将做属性测试);
+- Stage 线性序(backlog→ready→queued→implementing→review→approved→completed);
+- v0.2 §2.8 的七种「必须带 reason」情况(原文记录在 `Event.reason` 字段文档)。
+
+**没有** §2.3 的转换表原文:后退边(review→implementing?approved 能不能退?)
+和取消边完全没有仓库内依据。按规则第 5 条不猜,经项目所有者确认采用下述最小形状。
+
+### 决策
+
+**TaskStage(最小形状):**
+
+- 前进允许跨级(backlog→queued 合法,不必逐级);
+- 后退只有 review→implementing(审查打回重做);
+- canceled 可从任何非终态进入;
+- 终态(completed / canceled)没有出边。
+
+被否掉的备选:只许相邻前进 —— 收紧了没有当前消费方要求的自由度,
+而放开跨级只影响「事件少记几条」,不产生非法状态。
+
+**JobStatus(标准收尸流):**
+
+- queued→starting→running→{succeeded, failed};
+- starting/running→canceling→canceled;
+- queued→canceled 直接取消(还没有进程,不经过 canceling);
+- orphaned 只从 starting / running / canceling 进入(「进程没了但结果不明」
+  以进程存在为前提);
+- 终态没有出边。重试是**新的 Job**,不是旧 Job 复活。
+
+被否掉的备选:canceling 只从 running 进入 / queued 取消也要经过 canceling ——
+starting 阶段同样有进程可等;queued 没有进程,过一道 canceling 是空转。
+
+**交付边界(纯转换核心):**
+
+本工作包只交付:全显式边表(`legalTransitions`)、校验函数
+(`TaskStageTransition.validate` / `JobStatusTransition.validate`)、
+七种 `ManualOperation` 的类型化 reason 强制(`TransitionSource.manual` 的
+reason 非 Optional,编译期就不可能省略;空串与纯空白在运行期拒绝)。
+
+**不做**:事件持久化与重放(P1-05 / P1-06)、命令集定义、派生状态(P5-01)。
+完整 reducer 骨架被否掉的理由:命令集同样没有 v0.2 原文依据,
+现在设计它等于把「猜」从一张表扩大到整个命令层。
+
+### 两处刻意的边界声明
+
+**边表不管「怎样才能算完成」。** review→completed 在表里是合法边 ——
+mergedPR 策略要求 GitHub 确认合并,那是合并闸门(P5-06)与状态推导(P5-01)
+的职责。边表只回答「这一步会不会把状态机走进去出不来」,不回答「这一步该不该走」。
+
+**approved→review 不允许。** 审批失效(推了新代码)走 SHA 绑定表达
+(`ReviewRecord.isStale`),不靠 stage 后退表达 —— 否则同一个事实有两种记法。
+
+### 代价
+
+表可能与 v0.2 §2.3 有出入。全显式表 + 全矩阵钉死测试意味着:
+修正 = 改一处数据 + 改一处字面量,两者的 diff 会互相校验。
+
+### 回退条件
+
+拿到 v0.2 原文时对照修正;若原文与本报号冲突,以原文为准并更新本 ADR。
