@@ -68,8 +68,8 @@ jobs:
     env:
       # 已验证的工具链。升级时改这两行,并按 v0.3 §4 的流程走:
       # 记录回滚点 → 升级 → 跑契约测试 → 绿则记 ADR,红则查哪条契约破了。
-      VERIFIED_XCODE_APP: /Applications/Xcode_27_beta_4.app
-      VERIFIED_XCODE_BUILD: 27A5228h
+      VERIFIED_XCODE_APP: /Applications/Xcode_27_beta_6.app
+      VERIFIED_XCODE_BUILD: 27A5252f
 
     steps:
       - name: 检出
