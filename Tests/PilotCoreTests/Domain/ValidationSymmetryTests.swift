@@ -221,7 +221,7 @@ struct ValidationSymmetryTests {
                              completionPolicy: .mergedPR,
                              createdAt: Date(timeIntervalSince1970: 0),
                              updatedAt: Date(timeIntervalSince1970: 0))
-        task.bindPullRequest(number: 42)
+        task.bindPullRequest(number: 42, reason: try NonEmptyReason("人工关联到 #9 的修复 PR"))
         #expect(task.pullRequestNumber == 42)
         try assertRoundTrips(task, "绑定之后")
 
@@ -236,7 +236,7 @@ struct ValidationSymmetryTests {
             var task = PilotTask(id: UUID(), projectId: UUID(), displayNumber: 1,
                                  title: "t", type: .code, completionPolicy: .mergedPR,
                                  createdAt: Date(), updatedAt: Date())
-            task.bindPullRequest(number: 0)
+            task.bindPullRequest(number: 0, reason: try NonEmptyReason("x"))
         }
     }
 

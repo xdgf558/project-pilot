@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import PilotCore
+import PilotTestSupport
 
 // 转换表的形状经项目所有者 2026-09-03 确认(v0.2 §2.3 原文不在仓库)。
 // 全矩阵逐对钉死:表里任何一条边被增删,这里的字面量必须跟着改 ——
@@ -81,20 +82,13 @@ struct TaskStageTransitionTests {
 
     // MARK: - 手动路径与 reason
 
-    @Test("手动改状态必须带非空 reason,编译期由非 Optional 保证")
-    func manualStageChangeRequiresReason() throws {
+    @Test("手动改状态携带类型化 reason")
+    func manualStageChangeCarriesTypedReason() throws {
+        // reason 是 NonEmptyReason —— 空串在构造时就被拒(见 NonEmptyReasonTests),
+        // 这里只需证明合法 reason 的手动路径走得通。
         try TaskStageTransition.validate(TransitionRequest(
             from: .review, to: .implementing,
-            source: .manual(operation: .changeStage, reason: "审查打回,重做")))
-    }
-
-    @Test("空串和纯空白的 reason 都算没带", arguments: ["", " ", "\n\t "])
-    func blankReasonIsMissing(_ reason: String) {
-        #expect(throws: TransitionDenial.missingReason(operation: .changeStage)) {
-            try TaskStageTransition.validate(TransitionRequest(
-                from: .review, to: .implementing,
-                source: .manual(operation: .changeStage, reason: reason)))
-        }
+            source: .manual(operation: .changeStage, reason: try NonEmptyReason("审查打回,重做"))))
     }
 
     @Test("派生路径不需要 reason")
@@ -109,7 +103,7 @@ struct JobStatusTransitionTests {
 
     private static let expected: [JobStatus: Set<JobStatus>] = [
         .queued: [.starting, .canceled],
-        .starting: [.running, .canceling, .orphaned],
+        .starting: [.running, .failed, .canceling, .orphaned],
         .running: [.succeeded, .failed, .canceling, .orphaned],
         .canceling: [.canceled, .orphaned],
         .succeeded: [],
@@ -167,14 +161,26 @@ struct JobStatusTransitionTests {
     }
 
     @Test("手动取消作业是七种必须带 reason 的操作之一")
-    func manualCancelRequiresReason() throws {
+    func manualCancelCarriesTypedReason() throws {
         try JobStatusTransition.validate(TransitionRequest(
             from: .running, to: .canceling,
-            source: .manual(operation: .cancelJob, reason: "预算超限,用户叫停")))
-        #expect(throws: TransitionDenial.missingReason(operation: .cancelJob)) {
-            try JobStatusTransition.validate(TransitionRequest(
-                from: .running, to: .canceling, source: .manual(operation: .cancelJob, reason: "")))
+            source: .manual(operation: .cancelJob, reason: try NonEmptyReason("预算超限,用户叫停"))))
+        // 空串的 reason 构造不出来 —— 强制发生在类型层,不是校验器运行期。
+        #expect(throws: NonEmptyReasonError.self) {
+            _ = try NonEmptyReason("")
         }
+    }
+
+    @Test("启动阶段已知失败:starting→failed(秒退不是结果不明)")
+    func startupFailureHasAKnownEnding() throws {
+        // 执行器起来后立刻以已知错误退出(FakeProcessRunner 的秒退场景),
+        // 或者启动确认失败 —— 结果是「已知失败」,不能归到 orphaned(结果不明),
+        // 也不能停在非终态。该边由 2026-09-03 审查补上。
+        try JobStatusTransition.validate(
+            TransitionRequest(from: .starting, to: .failed, source: .derived))
+        // 对照:同样在 starting,进程没了但**不知道**为什么,才是 orphaned。
+        try JobStatusTransition.validate(
+            TransitionRequest(from: .starting, to: .orphaned, source: .derived))
     }
 
     @Test("失败的作业不能复活 —— 重试是新的 Job")
@@ -182,6 +188,93 @@ struct JobStatusTransitionTests {
         #expect(throws: TransitionDenial.leavingTerminalStage(state: "failed")) {
             try JobStatusTransition.validate(TransitionRequest(from: .failed, to: .running, source: .derived))
         }
+    }
+}
+
+@Suite("领域对象上的转换入口")
+struct DomainTransitionTests {
+
+    private func makeTask(stage: TaskStage) -> PilotTask {
+        PilotTask(id: UUID(sequenceNumber: 1), projectId: UUID(sequenceNumber: 100),
+                  displayNumber: 1, title: "t", type: .code, completionPolicy: .mergedPR,
+                  stage: stage, createdAt: Date(timeIntervalSince1970: 0),
+                  updatedAt: Date(timeIntervalSince1970: 0))
+    }
+
+    private func makeJob(status: JobStatus) -> Job {
+        Job(id: UUID(sequenceNumber: 1), projectId: UUID(sequenceNumber: 100),
+            taskId: UUID(sequenceNumber: 12), executor: .codex, executorVersion: "1.0",
+            authMode: .subscription, worktreePath: URL(fileURLWithPath: "/tmp/w"),
+            branchName: "b", status: status)
+    }
+
+    @Test("合法转换改变状态")
+    func legalTransitionChangesStage() throws {
+        var task = makeTask(stage: .queued)
+        try task.transition(to: .implementing, source: .derived)
+        #expect(task.stage == .implementing)
+    }
+
+    @Test("非法转换抛错且状态不变 —— 不部分修改")
+    func deniedTransitionLeavesStageAlone() {
+        var task = makeTask(stage: .completed)
+        #expect(throws: TransitionDenial.leavingTerminalStage(state: "completed")) {
+            try task.transition(to: .review, source: .derived)
+        }
+        #expect(task.stage == .completed)
+    }
+
+    @Test("作业:合法取消改变状态,手动路径带类型化 reason")
+    func jobTransitionHappyPath() throws {
+        var job = makeJob(status: .running)
+        try job.transition(to: .canceling,
+                           source: .manual(operation: .cancelJob,
+                                           reason: try NonEmptyReason("预算超限")))
+        #expect(job.status == .canceling)
+    }
+
+    @Test("作业:非法转换抛错且状态不变")
+    func deniedTransitionLeavesStatusAlone() {
+        var job = makeJob(status: .queued)
+        // 有进程的状态必须走 canceling,跳过它就是绕过「等进程退出」。
+        #expect(throws: TransitionDenial.edgeNotPermitted(from: "queued", to: "failed")) {
+            try job.transition(to: .failed, source: .derived)
+        }
+        #expect(job.status == .queued)
+    }
+}
+
+@Suite("NonEmptyReason")
+struct NonEmptyReasonTests {
+
+    @Test("非空内容构造成功且原样保留")
+    func keepsContent() throws {
+        let reason = try NonEmptyReason("  审查打回,重做  ")
+        // 只拒绝纯空白,不修剪内容 —— 修不算我的,原样留给事件。
+        #expect(reason.rawValue == "  审查打回,重做  ")
+        #expect(reason.description == "  审查打回,重做  ")
+    }
+
+    @Test("空串与纯空白构造失败", arguments: ["", " ", "\n\t ", "　"])
+    func rejectsBlank(_ raw: String) {
+        #expect(throws: NonEmptyReasonError.blank) {
+            _ = try NonEmptyReason(raw)
+        }
+    }
+
+    @Test("往返相等")
+    func roundTrips() throws {
+        let original = try NonEmptyReason("依赖 #3 已完成")
+        let data = try CanonicalJSON.makeSnapshotEncoder().encode(original)
+        #expect(try CanonicalJSON.makeDecoder().decode(NonEmptyReason.self, from: data) == original)
+    }
+
+    @Test("解码到空串报 dataCorrupted")
+    func rejectsBlankOnDecode() {
+        // 落盘数据里的空 reason 是损坏 —— 不能因为「类型会拒绝」就放过解码。
+        #expect(decodingErrorKind {
+            _ = try CanonicalJSON.makeDecoder().decode(NonEmptyReason.self, from: Data("\"\"".utf8))
+        } == .dataCorrupted)
     }
 }
 

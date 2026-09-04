@@ -1,5 +1,56 @@
 import Foundation
 
+/// 一条保证非空的原因。
+///
+/// v0.2 §2.8 的七种手动操作(force、手动绑定 PR、手动改状态、取消作业、
+/// 迁移、恢复备份、合并)要求事件必须带 reason —— 用类型而不是约定来满足:
+/// 空串与纯空白在**构造时**就被拒绝,而不是等校验器在运行期拦。
+///
+/// 「为什么」只存在于人脑里,不写下来就永久丢失;写了纯空白等于没写。
+public struct NonEmptyReason: Sendable, Hashable, Codable, CustomStringConvertible {
+    public let rawValue: String
+
+    /// 空串或纯空白抛 `NonEmptyReasonError.blank`。
+    public init(_ rawValue: String) throws {
+        guard !rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NonEmptyReasonError.blank
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "reason 不能是空串或纯空白 —— 那等于没带为什么"
+            )
+        }
+        rawValue = raw
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+/// `NonEmptyReason` 构造失败的原因。
+public enum NonEmptyReasonError: Error, LocalizedError {
+    /// 空串或纯空白。
+    case blank
+
+    public var errorDescription: String? {
+        switch self {
+        case .blank:
+            return "原因(reason)不能是空串或纯空白。v0.2 §2.8:半年后回看一次强制操作,需要知道当时为什么。"
+        }
+    }
+}
+
 /// 谁发起了一次状态转换。
 ///
 /// 这里的区分是 v0.2 §2.8「七种情况必须带 reason」的**编译期落点**:
@@ -11,9 +62,9 @@ public enum TransitionSource: Sendable, Hashable {
     case derived
     /// 人或强制操作。v0.2 §2.8 的七种情况走这里,**必须**带非空 reason。
     ///
-    /// 半年后回看一次强制操作,需要知道的是当时为什么绕过闸门 ——
-    /// 那只存在于人脑里,不写下来就永久丢失。
-    case manual(operation: ManualOperation, reason: String)
+    /// reason 的类型是 `NonEmptyReason` —— 空串在构造时就被拒,
+    /// 「忘了带为什么」不是运行期才拦的错,是构造不出来的值。
+    case manual(operation: ManualOperation, reason: NonEmptyReason)
 }
 
 /// v0.2 §2.8 规定**必须**记录 reason 的七种操作。
@@ -74,8 +125,6 @@ public enum TransitionDenial: Sendable, Hashable, Error, LocalizedError {
     case leavingTerminalStage(state: String)
     /// 这条边不在合法转换表里。查 `legalTransitions` 看当前允许哪些去处。
     case edgeNotPermitted(from: String, to: String)
-    /// 手动操作必须带非空 reason。空串或纯空白等于没带。
-    case missingReason(operation: ManualOperation)
 
     public var errorDescription: String? {
         switch self {
@@ -85,8 +134,6 @@ public enum TransitionDenial: Sendable, Hashable, Error, LocalizedError {
             return "「\(state)」是终态,不能再转换。终态之后要修正,请追加新的事件,而不是改旧状态。"
         case .edgeNotPermitted(let from, let to):
             return "状态不允许从「\(from)」改到「\(to)」:这条边不在合法转换表里。允许的去处见 legalTransitions。"
-        case .missingReason(let operation):
-            return "手动\(operation.label)必须附带原因(reason)。v0.2 §2.8:半年后回看一次强制操作,需要知道当时为什么。空串或纯空白等于没带。"
         }
     }
 }
@@ -127,21 +174,12 @@ public enum TaskStageTransition {
             preconditionFailure("转换表缺少 \(request.from.rawValue) 的条目 —— 表必须是全函数")
         }
         if targets.contains(request.to) {
-            try checkReason(request.source)
             return
         }
         if request.from.isTerminal {
             throw TransitionDenial.leavingTerminalStage(state: request.from.rawValue)
         }
         throw TransitionDenial.edgeNotPermitted(from: request.from.rawValue, to: request.to.rawValue)
-    }
-
-    private static func checkReason(_ source: TransitionSource) throws {
-        if case .manual(let operation, let reason) = source {
-            if reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                throw TransitionDenial.missingReason(operation: operation)
-            }
-        }
     }
 }
 
@@ -151,6 +189,9 @@ extension JobStatus {
     /// 合法转换边,**全显式**(2026-09-03 经项目所有者确认的标准收尸流,见 ADR-0014):
     ///
     /// - 线性前进:queued→starting→running→{succeeded, failed};
+    /// - starting→failed:启动阶段**已知**失败 —— 进程秒退、或启动确认失败。
+    ///   结果是已知的,不是「结果不明」,不能归到 orphaned;
+    ///   该边由 2026-09-03 审查补上(FakeProcessRunner 的秒退场景,ADR-0005);
     /// - 取消要走 canceling(等进程退出):starting/running→canceling→canceled;
     /// - queued 还没有进程,直接 canceled,不经过 canceling;
     /// - orphaned 只从「预期进程活着」的状态进入:starting / running / canceling;
@@ -159,7 +200,7 @@ extension JobStatus {
     ///   重试是**新的 Job**(attempt +1),不是旧 Job 复活。
     public static let legalTransitions: [JobStatus: Set<JobStatus>] = [
         .queued: [.starting, .canceled],
-        .starting: [.running, .canceling, .orphaned],
+        .starting: [.running, .failed, .canceling, .orphaned],
         .running: [.succeeded, .failed, .canceling, .orphaned],
         .canceling: [.canceled, .orphaned],
         .succeeded: [],
@@ -180,20 +221,11 @@ public enum JobStatusTransition {
             preconditionFailure("转换表缺少 \(request.from.rawValue) 的条目 —— 表必须是全函数")
         }
         if targets.contains(request.to) {
-            try checkReason(request.source)
             return
         }
         if request.from.isTerminal {
             throw TransitionDenial.leavingTerminalStage(state: request.from.rawValue)
         }
         throw TransitionDenial.edgeNotPermitted(from: request.from.rawValue, to: request.to.rawValue)
-    }
-
-    private static func checkReason(_ source: TransitionSource) throws {
-        if case .manual(let operation, let reason) = source {
-            if reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                throw TransitionDenial.missingReason(operation: operation)
-            }
-        }
     }
 }
