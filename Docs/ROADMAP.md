@@ -41,8 +41,10 @@
 
 按依赖顺序:
 
-1. **P1-03** 状态转换 reducer —— TaskStage / JobStatus 的合法转换;
-   v0.2 §2.8 七种「必须带 reason」的情况也由这层强制(模型层判断不了 eventType 属不属于那七种)。
+1. **P1-03** 状态转换 reducer —— TaskStage / JobStatus 的合法转换;状态字段收口到
+   唯一写入口(transition(to:source:)),手动改状态与取消作业的 reason 在类型层强制
+   (NonEmptyReason)。绑定 PR 的入口已一并强制;迁移 / 恢复备份 / 合并三种的入口
+   尚不存在,强制随各自命令落地(P1-07 命令层起)。
 2. **P1-05** 快照仓库 —— 原子写、revision 乐观校验、**校验和的计算与验证**
    (P1-01 只定义了 `Checksum` 类型,当前无人计算无人验证,是占位)。
 3. **P1-06** 事件日志与重放(NDJSON、sequence 游标、快照重放起点)。

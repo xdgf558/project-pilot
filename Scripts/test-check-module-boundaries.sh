@@ -46,6 +46,30 @@ case_file() {
     fi
 }
 
+echo "生命周期状态字段收口(检查 2.5)"
+# 检查 2.5 是文件定向的(只盯 PilotTask.swift / Job.swift),
+# fixture 投放式用例不适用,改用「备份-注入-还原」:
+# 在真实文件末尾追加一行可绕过的字段声明,断言检查器变红。
+state_field_case() {
+    local name="$1" file="$2" line="$3"
+    cp "$file" "$file.bak"
+    printf '\n%s\n' "$line" >> "$file"
+    "$CHECK" >/dev/null 2>&1
+    local got=$?
+    mv -f "$file.bak" "$file"
+    if [ "$got" -eq 1 ]; then
+        printf '  \033[32m✓\033[0m %s\n' "$name"
+        pass=$((pass + 1))
+    else
+        printf '  \033[31m✗\033[0m %s  (期望退出码 1,实际 %s)\n' "$name" "$got"
+        fail=$((fail + 1))
+    fi
+}
+state_field_case "PilotTask.stage 改回 public var 被拦下" \
+    "$CORE_DIR/Domain/PilotTask.swift" "public var stage: TaskStage = .backlog"
+state_field_case "Job.status 改回 public var 被拦下" \
+    "$CORE_DIR/Domain/Job.swift" "public var status: JobStatus = .queued"
+
 echo "基线"
 "$CHECK" >/dev/null 2>&1
 if [ $? -eq 0 ]; then

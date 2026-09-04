@@ -30,7 +30,10 @@ public struct PilotTask: Sendable, Hashable, Codable, Identifiable {
     public var acceptanceCriteria: [String]
     public var type: TaskType
     public var completionPolicy: CompletionPolicy
-    public var stage: TaskStage
+    /// 生命周期阶段。**只能通过 `transition(to:source:)` 改** ——
+    /// 那是唯一入口,合法性由 `TaskStage.legalTransitions` 强制:
+    /// 终态不可离开、边表之外的移动直接抛错。直接赋值在编译期就不存在。
+    public private(set) var stage: TaskStage
     public var blockers: [Blocker]
     /// 依赖的任务。自依赖、缺失、跨项目非法、循环的检测在 P5-03,
     /// **不在这里** —— 那需要看到整张图,单个任务判断不了。
@@ -85,6 +88,16 @@ public struct PilotTask: Sendable, Hashable, Codable, Identifiable {
         self.updatedAt = updatedAt
     }
 
+    /// 改生命周期阶段的唯一入口。
+    ///
+    /// 校验失败时**什么都不改** —— 先验边表,通过才赋值。
+    /// 时间戳(`updatedAt`)不在这里动:落盘时由仓库层(P1-05)统一负责。
+    public mutating func transition(to target: TaskStage, source: TransitionSource) throws {
+        let request = TransitionRequest(from: stage, to: target, source: source)
+        try TaskStageTransition.validate(request)
+        stage = target
+    }
+
     /// 改标题。
     ///
     /// 用 `precondition` 而不是抛错,是为了和构造器保持一致 ——
@@ -96,12 +109,19 @@ public struct PilotTask: Sendable, Hashable, Codable, Identifiable {
     }
 
     /// 绑定一个 PR。
-    public mutating func bindPullRequest(number: Int) {
+    ///
+    /// 手动绑定 PR 是 v0.2 §2.8 七种必须带 reason 的操作之一 ——
+    /// reason 用 `NonEmptyReason` 承载,空串构造不出来。
+    public mutating func bindPullRequest(number: Int, reason: NonEmptyReason) {
         precondition(number >= 1, "PR 编号从 1 起,收到:\(number)")
         pullRequestNumber = number
     }
 
     /// 解绑 PR。
+    ///
+    /// v0.2 §2.8 的七种清单里写的是「手动绑定 PR」,没有点名解绑。
+    /// 这里**不**要求 reason —— 不替 v0.2 发明政策;解绑是否同属该族,
+    /// 留给 v0.2 原文确认(见 ADR-0014 的开放问题)。
     public mutating func unbindPullRequest() {
         pullRequestNumber = nil
     }

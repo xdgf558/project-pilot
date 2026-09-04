@@ -117,7 +117,10 @@ public struct Job: Sendable, Hashable, Codable, Identifiable {
     public private(set) var processId: Int32?
     public private(set) var processStartIdentity: ProcessStartIdentity?
 
-    public var status: JobStatus
+    /// 生命周期状态。**只能通过 `transition(to:source:)` 改** ——
+    /// 那是唯一入口,合法性由 `JobStatus.legalTransitions` 强制。
+    /// 直接赋值在编译期就不存在。
+    public private(set) var status: JobStatus
     public var startedAt: Date?
     /// 最后一次心跳。判断作业是否还活着靠它加进程身份,不能只看进程在不在。
     public var heartbeatAt: Date?
@@ -208,6 +211,17 @@ public struct Job: Sendable, Hashable, Codable, Identifiable {
     public mutating func detachProcess() {
         processId = nil
         processStartIdentity = nil
+    }
+
+    /// 改生命周期状态的唯一入口。
+    ///
+    /// 校验失败时**什么都不改** —— 先验边表,通过才赋值。
+    /// 只动 `status`:startedAt / finishedAt / exitCode 这些生命周期字段的
+    /// 联动归运行器与收尸流程(P6-07),不在这里顺手写。
+    public mutating func transition(to target: JobStatus, source: TransitionSource) throws {
+        let request = TransitionRequest(from: status, to: target, source: source)
+        try JobStatusTransition.validate(request)
+        status = target
     }
 
     /// 进程身份是否完整到可以安全地对它下手(取消、收尸)。

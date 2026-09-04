@@ -801,3 +801,112 @@ CI 是 beta 4(27A5228h,swiftlang-6.4.0.27.1)。主版本一致,补丁号不同�
 ```
 sudo xcode-select -s /Applications/Xcode-27-beta-6.app
 ```
+
+---
+
+## ADR-0014:状态转换表在 v0.2 §2.3 原文缺席下的最小形状
+
+**状态:** 已采纳(转换表形状经项目所有者 2026-09-03 三选一确认)
+**日期:** 2026-09-03
+**偏离:** P1-03 工作包原文与 v0.2 §2.3 的转换表均不在仓库内,无从对照
+**工作包:** P1-03
+
+### 背景
+
+P1-03 要求「状态转换 reducer」。仓库内关于转换规则的证据只有:
+
+- 终态不可离开(TaskStage / JobStatus 各自的 `isTerminal` 文档,P5-12 将做属性测试);
+- Stage 线性序(backlog→ready→queued→implementing→review→approved→completed);
+- v0.2 §2.8 的七种「必须带 reason」情况(原文记录在 `Event.reason` 字段文档)。
+
+**没有** §2.3 的转换表原文:后退边(review→implementing?approved 能不能退?)
+和取消边完全没有仓库内依据。按规则第 5 条不猜,经项目所有者确认采用下述最小形状。
+
+### 决策
+
+**TaskStage(最小形状):**
+
+- 前进允许跨级(backlog→queued 合法,不必逐级);
+- 后退只有 review→implementing(审查打回重做);
+- canceled 可从任何非终态进入;
+- 终态(completed / canceled)没有出边。
+
+被否掉的备选:只许相邻前进 —— 收紧了没有当前消费方要求的自由度,
+而放开跨级只影响「事件少记几条」,不产生非法状态。
+
+**JobStatus(标准收尸流):**
+
+- queued→starting→running→{succeeded, failed};
+- starting/running→canceling→canceled;
+- queued→canceled 直接取消(还没有进程,不经过 canceling);
+- orphaned 只从 starting / running / canceling 进入(「进程没了但结果不明」
+  以进程存在为前提);
+- 终态没有出边。重试是**新的 Job**,不是旧 Job 复活。
+
+被否掉的备选:canceling 只从 running 进入 / queued 取消也要经过 canceling ——
+starting 阶段同样有进程可等;queued 没有进程,过一道 canceling 是空转。
+
+**交付边界(纯转换核心):**
+
+本工作包只交付:全显式边表(`legalTransitions`)、校验函数
+(`TaskStageTransition.validate` / `JobStatusTransition.validate`)、
+七种 `ManualOperation` 的类型化 reason 强制(`TransitionSource.manual` 的
+reason 非 Optional,编译期就不可能省略;空串与纯空白在运行期拒绝)。
+
+**不做**:事件持久化与重放(P1-05 / P1-06)、命令集定义、派生状态(P5-01)。
+完整 reducer 骨架被否掉的理由:命令集同样没有 v0.2 原文依据,
+现在设计它等于把「猜」从一张表扩大到整个命令层。
+
+### 两处刻意的边界声明
+
+**边表不管「怎样才能算完成」。** review→completed 在表里是合法边 ——
+mergedPR 策略要求 GitHub 确认合并,那是合并闸门(P5-06)与状态推导(P5-01)
+的职责。边表只回答「这一步会不会把状态机走进去出不来」,不回答「这一步该不该走」。
+
+**approved→review 不允许。** 审批失效(推了新代码)走 SHA 绑定表达
+(`ReviewRecord.isStale`),不靠 stage 后退表达 —— 否则同一个事实有两种记法。
+
+### 代价
+
+表可能与 v0.2 §2.3 有出入。全显式表 + 全矩阵钉死测试意味着:
+修正 = 改一处数据 + 改一处字面量,两者的 diff 会互相校验。
+
+### 回退条件
+
+拿到 v0.2 原文时对照修正;若原文与本报号冲突,以原文为准并更新本 ADR。
+
+### 2026-09-03 审查修订:三处
+
+第一轮审查(Request changes,2 P1 + 1 P2)指出:边表校验器存在,但字段仍可
+绕过它直接赋值 —— 校验器只是可选工具,不是不变量。三处修正:
+
+**一、状态字段收口(对 P1-02a「已知限制 3」的部分推翻)。**
+`PilotTask.stage` 与 `Job.status` 改为 `public private(set)`,唯一写入口是
+类型上的 `transition(to:source:)`:先验边表,通过才赋值,失败不部分修改。
+P1-02a 当时说「真正的写入约束来自只有仓库层能落盘」—— 那句话在转换规则
+尚不存在时成立;规则存在之后,内存副本也必须走边表,否则非法转换可以在
+任何一份副本上做出来。仓库层落盘约束(P1-05)照旧,两层不互替。
+CI 强制落在边界检查(检查 2.5,单元测试无法断言「不该编译」)。
+
+**二、reason 强制升到类型层。** 新增 `NonEmptyReason`:空串与纯空白在
+构造时被拒,`TransitionSource.manual` 与 `bindPullRequest` 接收该类型,
+「忘了带为什么」从运行期错误变成构造不出来的值。校验器里的
+`missingReason` 分支随之删除(不可达)。
+
+**强制范围如实修正(对照 ROADMAP 原表述):**
+七种操作里,手动改状态、取消作业走 `TransitionSource.manual`,绑定 PR
+入口已存在、一并强制;**迁移、恢复备份、合并三种的入口尚不存在**,
+强制随各自命令落地(P1-07 命令层起)—— 只声明枚举 case 约束不了
+不存在的入口。`.derived` 路径的诚实性同样由命令层保证:命令是唯一
+公开入口,域模型层只能让诚实路径顺手、不诚实路径显眼。
+
+**三、补 starting→failed。** 启动阶段**已知**失败(进程秒退、启动确认失败)
+此前没有合法终态路径 —— 只能误标 orphaned(结果不明)或卡在非终态。
+语义分界:结果已知走 failed,结果不明才走 orphaned。
+queued→failed 暂不加:派工在认领前失败时作业留在 queued,由重试策略
+(P7-06)处置;若将来证明需要再补。
+
+### 开放问题
+
+`unbindPullRequest` 未要求 reason —— §2.8 清单写的是「手动绑定 PR」,
+没有点名解绑。不替 v0.2 发明政策;若原文把解绑同列入七种,放开是一行改动。

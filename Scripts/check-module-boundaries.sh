@@ -90,6 +90,38 @@ while IFS= read -r file; do
     scan "$file" "$SHELL_FORBIDDEN" "禁止通过 shell 执行外部命令,改用 Process.executableURL + 参数数组"
 done < <(find Sources -name '*.swift' 2>/dev/null)
 
+# ── 检查 2.5:生命周期状态字段必须收口到唯一写入口 ─────────────────────
+#
+# P1-03 把 TaskStage / JobStatus 的合法转换做成了边表校验,但校验器
+# 只有在字段不可绕过时才是领域不变量。PilotTask.stage 与 Job.status
+# 必须 private(set) —— 唯一的写入口是类型上的 transition(to:source:)。
+#
+# 单元测试无法断言「这行代码不该编译」,所以这条落在边界检查里:
+# 让绕过变成 CI 红灯,而不是靠审查者的眼睛。
+#
+# 只盯这两个生命周期字段:PullRequestSnapshot / StatusCheck 里的
+# state / status 是快照镜像字段(整份快照一起替换),不归边表管。
+# 检查是「含 var stage/status 但不含 private(set) 就报」——
+# init 参数与自赋值不带 var,不会误伤。
+
+echo "检查生命周期状态字段收口…"
+for f in Sources/PilotCore/Domain/PilotTask.swift Sources/PilotCore/Domain/Job.swift; do
+    if [ ! -f "$f" ]; then
+        printf '  \033[31m✗\033[0m %s\n      → 文件不存在,检查 2.5 无法执行\n' "$f"
+        fail=1
+        continue
+    fi
+    bad_lines=$(strip_comments < "$f" | grep -nE 'var[[:space:]]+(stage|status)\b' | grep -v 'private(set)' || true)
+    if [ -n "$bad_lines" ]; then
+        while IFS=: read -r lineno content; do
+            [ -z "${lineno:-}" ] && continue
+            report "$f" "$lineno" "$(echo "$content" | sed 's/^[[:space:]]*//')" \
+                "生命周期状态字段必须 private(set),唯一写入口是 transition(to:source:)"
+        done <<< "$bad_lines"
+        fail=1
+    fi
+done
+
 # ── 检查 3:PilotCore 未声明任何 target 依赖 ───────────────────────────
 #
 # 解析 SPM 真实清单,而不是 grep Package.swift 的文本 ——
