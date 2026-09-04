@@ -7,9 +7,11 @@ struct JSONValueTests {
 
     @Test("各种标量往返")
     func scalarsRoundTrip() throws {
+        // 整数值一律用 .integer 构造:JSONEncoder 会把整数值的 Double
+        // 写成整数字面量,往返后是 .integer —— 两者不相等是设计(见下)。
         let cases: [JSONValue] = [
             .null, .bool(true), .bool(false),
-            .number(0), .number(-1.5), .number(1e10),
+            .integer(0), .number(-1.5), .number(0.1), .integer(10_000_000_000),
             .string(""), .string("中文与 emoji 🚀"),
         ]
         for value in cases {
@@ -22,8 +24,8 @@ struct JSONValueTests {
     func nestedRoundTrips() throws {
         let value = JSONValue.object([
             "tasks": .array([
-                .object(["id": .number(1), "done": .bool(false)]),
-                .object(["id": .number(2), "done": .bool(true), "note": .null]),
+                .object(["id": .integer(1), "done": .bool(false)]),
+                .object(["id": .integer(2), "done": .bool(true), "note": .null]),
             ]),
             "meta": .object(["version": .string("v1")]),
         ])
@@ -38,9 +40,28 @@ struct JSONValueTests {
         """
         let value = try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))
         #expect(value == .object([
-            "a": .array([.number(1), .string("two"), .null, .object(["b": .bool(false)])]),
+            "a": .array([.integer(1), .string("two"), .null, .object(["b": .bool(false)])]),
             "c": .number(3.5),
         ]))
+    }
+
+    @Test("超出 Double 精度的整数原样往返")
+    func bigIntegerRoundTripsExactly() throws {
+        // 9007199254740993 = 2^53 + 1,Double 表示不了它。
+        // 按 Double 存的旧设计在这里丢精度 → 重编码字节变了 →
+        // 一份完好的未来版本快照会被仓库层误报损坏(P1-05 审查发现)。
+        let value = JSONValue.integer(9_007_199_254_740_993)
+        let data = try JSONEncoder().encode(value)
+        #expect(String(data: data, encoding: .utf8) == "9007199254740993")
+        #expect(try JSONDecoder().decode(JSONValue.self, from: data) == value)
+    }
+
+    @Test("整数与小数不相等,即使数值相同")
+    func integerAndNumberAreDistinct() throws {
+        // JSON 写 42 与 42.0 是两种字节表示,往返时各自保持 ——
+        // 混同会让「字节变了」伪装成「值没变」。
+        #expect(JSONValue.integer(42) != JSONValue.number(42))
+        #expect(JSONValue.integer(-1) != JSONValue.number(-1))
     }
 
     @Test("布尔不会被当成数字")
@@ -50,5 +71,6 @@ struct JSONValueTests {
         let value = try JSONDecoder().decode(JSONValue.self, from: Data("true".utf8))
         #expect(value == .bool(true))
         #expect(value != .number(1))
+        #expect(value != .integer(1))   // Int64 分支插进来之后,布尔也不能被它吃掉
     }
 }

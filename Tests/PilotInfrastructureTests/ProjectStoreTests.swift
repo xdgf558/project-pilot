@@ -255,6 +255,118 @@ struct ProjectStoreTests {
         #expect(final.envelope.revision == Revision(3))
     }
 
+    // MARK: - 并发(跨进程锁)
+
+    /// 线程安全的结果盒子:每个线程只写自己的槽位,读用锁保护。
+    private final class OutcomeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var outcome: Result<Void, Error>?
+        func set(_ value: Result<Void, Error>) {
+            lock.lock(); defer { lock.unlock() }
+            outcome = value
+        }
+        func get() -> Result<Void, Error>? {
+            lock.lock(); defer { lock.unlock() }
+            return outcome
+        }
+    }
+
+    @Test("并发双写:恰好一个成功,不可能都成功", arguments: Implementation.allCases)
+    func concurrentWritersExactlyOneWins(_ implementation: Implementation) throws {
+        // 无锁时,两个 writer 都能在对方 rename 前通过校验 → 双双成功、
+        // 后写覆盖先写。锁把「校验 → 替换」变成事务后,结局被钉死:
+        // 恰好一个成功,另一个冲突。跑多轮放大窗口。
+        for _ in 0..<20 {
+            let (fileSystem, store, url) = try makeSubject(implementation)
+            try store.save(makeEnvelope(revision: Revision(1),
+                                        payload: Payload(name: "初版", count: 0)),
+                           to: url, expecting: .initial)
+
+            // 两个 writer 基于同一份 r1 副本(先读,再一起开跑)。
+            let a = try #require(try store.load(from: url))
+            let b = try #require(try store.load(from: url))
+
+            let startGate = DispatchSemaphore(value: 0)
+            let doneGate = DispatchSemaphore(value: 0)
+            let boxA = OutcomeBox()
+            let boxB = OutcomeBox()
+
+            func writer(_ box: OutcomeBox, _ name: String, _ count: Int) {
+                startGate.wait()
+                do {
+                    try store.save(Self.bumped(a.envelope,
+                                               payload: Payload(name: name, count: count)),
+                                   to: url, expecting: a.envelope.revision)
+                    box.set(.success(()))
+                } catch {
+                    box.set(.failure(error))
+                }
+                doneGate.signal()
+            }
+
+            let threadA = Thread { writer(boxA, "A 写入", 1) }
+            let threadB = Thread { writer(boxB, "B 写入", 2) }
+            threadA.start(); threadB.start()
+            startGate.signal(); startGate.signal()
+            doneGate.wait(); doneGate.wait()
+            _ = fileSystem
+
+            let outcomes = [boxA.get()!, boxB.get()!]
+            let successes = outcomes.filter { if case .success = $0 { return true }; return false }
+            let conflicts = outcomes.filter {
+                if case .failure(ProjectStoreError.revisionConflict) = $0 { return true }; return false
+            }
+            #expect(successes.count == 1, "两写入同时成功 = 丢更新")
+            #expect(conflicts.count == 1)
+
+            let onDisk = try #require(try store.load(from: url))
+            #expect(onDisk.envelope.revision == Revision(2))
+        }
+    }
+
+    @Test("保存的 envelope 版本不是当前代码的版本时被拒",
+          arguments: [SchemaVersion(99), SchemaVersion(2)])
+    func rejectsNonCurrentEnvelopeVersion(_ savedVersion: SchemaVersion) throws {
+        // 当前版本写入一个 v99 的 envelope,随后 load 立刻 isReadOnly ——
+        // 自己刚写的文件自己再也无法更新。写入时就必须挡下。
+        let (_, store, url) = try makeSubject(.inMemory)
+        let future = DataEnvelope(
+            schemaVersion: savedVersion, revision: Revision(1),
+            lastEventSequence: 0, createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0), checksum: Checksum(value: 0),
+            payload: Payload(name: "x", count: 1))
+
+        #expect(throws: ProjectStoreError.envelopeVersionMismatch(
+            url: url, saved: savedVersion, current: SchemaVersion.current)) {
+            try store.save(future, to: url, expecting: .initial)
+        }
+        #expect(try store.load(from: url) == nil)   // 什么都没写进去
+    }
+
+    @Test("未来版本的未知大整数:可读、不误报损坏、再保存不丢", arguments: Implementation.allCases)
+    func futureBigIntegerSurvives(_ implementation: Implementation) throws {
+        // 2^53 + 1 在 Double 下会被吃成 2^53 —— 旧版解码、重编码后字节变了,
+        // 一份完好的未来版本快照会被误报损坏。.integer 保真后必须原样往返。
+        let (fileSystem, store, url) = try makeSubject(implementation)
+        try store.save(makeEnvelope(revision: Revision(1)), to: url, expecting: .initial)
+        let loaded = try #require(try store.load(from: url))
+
+        // 模拟未来版本:写入带大整数的未知字段(按 envelope 范围重算校验和)。
+        var future = DataEnvelope(
+            schemaVersion: SchemaVersion(99), revision: loaded.envelope.revision.next,
+            lastEventSequence: loaded.envelope.lastEventSequence,
+            createdAt: loaded.envelope.createdAt, updatedAt: loaded.envelope.updatedAt,
+            checksum: loaded.envelope.checksum, payload: loaded.envelope.payload,
+            unknownFields: ["futureSequence": .integer(9_007_199_254_740_993)])
+        future = Self.restamp(future)
+        try fileSystem.write(try CanonicalJSON.makeSnapshotEncoder().encode(future), to: url)
+
+        let fromFuture = try #require(try store.load(from: url))
+        #expect(fromFuture.isReadOnly)
+        #expect(fromFuture.envelope.unknownFields["futureSequence"]
+                == .integer(9_007_199_254_740_993))   // 一个 bit 都不能动
+    }
+
     // MARK: - 版本策略
 
     @Test("更新版本写的文件可读不可写", arguments: Implementation.allCases)

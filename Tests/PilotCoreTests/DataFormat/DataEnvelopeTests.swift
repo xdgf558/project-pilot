@@ -112,7 +112,7 @@ struct DataEnvelopeTests {
         #expect(decoded.unknownFields["futureFlag"] == .bool(true))
         #expect(decoded.unknownFields["futureNote"] == .null)
         #expect(decoded.unknownFields["futureConfig"] == .object([
-            "retries": .number(3),
+            "retries": .integer(3),
             "labels": .array([.string("a"), .string("b")]),
         ]))
 

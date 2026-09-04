@@ -34,6 +34,10 @@ public enum ProjectStoreError: Error, Equatable, Sendable, LocalizedError {
     case revisionNotAdvanced(url: URL, expected: Revision, saved: Revision)
     /// 磁盘数据由更新版本的 ProjectPilot 写入,当前版本只读。
     case readOnly(url: URL, diskVersion: SchemaVersion)
+    /// 要保存的 envelope 标注的 schemaVersion 不是当前代码写出的版本。
+    /// 写旧版或新版格式需要显式的导出 / 迁移 API(尚不存在)——
+    /// 否则一次写入就可能把当前版本自己锁成只读。
+    case envelopeVersionMismatch(url: URL, saved: SchemaVersion, current: SchemaVersion)
 
     public var errorDescription: String? {
         switch self {
@@ -50,6 +54,10 @@ public enum ProjectStoreError: Error, Equatable, Sendable, LocalizedError {
         case .readOnly(let url, let diskVersion):
             return "「\(url.path)」由更新版本(\(diskVersion.description))的 ProjectPilot 写入,"
                 + "当前版本(v\(SchemaVersion.current.rawValue))只能读。升级 ProjectPilot 后可写。"
+        case .envelopeVersionMismatch(let url, let saved, let current):
+            return "保存被拒:\(url.path) 的 envelope 标注 v\(saved.rawValue),"
+                + "当前代码写 v\(current.rawValue)。写旧版或新版格式需要显式的导出 / 迁移 API,"
+                + "否则写完这个版本自己就读不回写了。"
         }
     }
 }
@@ -88,6 +96,9 @@ public struct ProjectStore<Payload: Codable & Sendable>: Sendable {
 
     /// 读取快照。文件不存在时返回 nil(首次运行)—— 调用方决定初始状态,
     /// 仓库层不伪造空快照。损坏抛 `ProjectStoreError.corrupted`。
+    ///
+    /// 读**不加锁**:replace 的原子性保证读到的要么是旧文件要么是新文件,
+    /// 永远不会是半截。给读也上锁只会把并发的读者串行化,不换来任何东西。
     public func load(from url: URL) throws -> LoadedSnapshot<Payload>? {
         guard let envelope = try readEnvelope(at: url) else { return nil }
         let isReadOnly = envelope.schemaVersion > SchemaVersion.current
@@ -105,29 +116,41 @@ public struct ProjectStore<Payload: Codable & Sendable>: Sendable {
         to url: URL,
         expecting expected: Revision
     ) throws {
-        let onDisk = try readEnvelope(at: url)
+        // 「读盘校验 → 临时写 → rename」必须整体处于跨进程锁内。
+        // 校验与替换之间的窗口不锁,两个进程都能通过校验、后写者覆盖先写者 ——
+        // rename 的原子性管不到 check-then-act 的时序。
+        try fileSystem.withExclusiveLock(at: url) {
+            let onDisk = try readEnvelope(at: url)
 
-        if let disk = onDisk {
-            if disk.schemaVersion > SchemaVersion.current {
-                throw ProjectStoreError.readOnly(url: url, diskVersion: disk.schemaVersion)
+            if let disk = onDisk {
+                if disk.schemaVersion > SchemaVersion.current {
+                    throw ProjectStoreError.readOnly(url: url, diskVersion: disk.schemaVersion)
+                }
+                guard disk.revision == expected else {
+                    throw ProjectStoreError.revisionConflict(
+                        url: url, onDisk: disk.revision, expected: expected)
+                }
+            } else if expected != .initial {
+                // 文件消失了,而调用方以为自己读过它 —— 这也是冲突:
+                // 基于一个已经不存在的副本继续写,同样会覆盖别人。
+                throw ProjectStoreError.revisionConflict(url: url, onDisk: nil, expected: expected)
             }
-            guard disk.revision == expected else {
-                throw ProjectStoreError.revisionConflict(
-                    url: url, onDisk: disk.revision, expected: expected)
+
+            // 待存 envelope 的版本必须就是当前代码的版本。
+            // 否则一次写入(v99)会让当前版本自己刚写的文件立刻只读。
+            guard envelope.schemaVersion == SchemaVersion.current else {
+                throw ProjectStoreError.envelopeVersionMismatch(
+                    url: url, saved: envelope.schemaVersion, current: SchemaVersion.current)
             }
-        } else if expected != .initial {
-            // 文件消失了,而调用方以为自己读过它 —— 这也是冲突:
-            // 基于一个已经不存在的副本继续写,同样会覆盖别人。
-            throw ProjectStoreError.revisionConflict(url: url, onDisk: nil, expected: expected)
-        }
 
-        guard envelope.revision == expected.next else {
-            throw ProjectStoreError.revisionNotAdvanced(
-                url: url, expected: expected, saved: envelope.revision)
-        }
+            guard envelope.revision == expected.next else {
+                throw ProjectStoreError.revisionNotAdvanced(
+                    url: url, expected: expected, saved: envelope.revision)
+            }
 
-        let stamped = Self.withChecksum(try Self.integrityHash(for: envelope), on: envelope)
-        try writeAtomically(Self.canonicalData(stamped), to: url)
+            let stamped = Self.withChecksum(try Self.integrityHash(for: envelope), on: envelope)
+            try writeAtomically(Self.canonicalData(stamped), to: url)
+        }
     }
 
     // MARK: - 内部

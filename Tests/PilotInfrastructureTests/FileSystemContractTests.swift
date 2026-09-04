@@ -289,3 +289,90 @@ struct FileSystemContractTests {
         #expect(try fs.read(at: source) == Data("new".utf8))
     }
 }
+
+
+/// withExclusiveLock 的契约用例(独立 Suite,避免塞进已经很长的主套件)。
+@Suite("withExclusiveLock 契约")
+struct WithExclusiveLockContractTests {
+
+    enum Implementation: String, CaseIterable, Sendable {
+        case inMemory
+        case system
+    }
+
+    private func makeSubject(_ implementation: Implementation) throws
+        -> (fileSystem: any FileSystem, target: URL, cleanup: @Sendable () -> Void)
+    {
+        switch implementation {
+        case .inMemory:
+            let fileSystem = InMemoryFileSystem()
+            let dir = URL(fileURLWithPath: "/pilot-test-\(UUID().uuidString)")
+            try fileSystem.createDirectory(at: dir)   // 锁文件与目标都需要父目录
+            let target = dir.appendingPathComponent("state.json")
+            return (fileSystem, target, {})
+        case .system:
+            let fileSystem = SystemFileSystem()
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pilot-lock-\(UUID().uuidString)", isDirectory: true)
+            try fileSystem.createDirectory(at: dir)
+            let target = dir.appendingPathComponent("state.json")
+            return (fileSystem, target, { try? FileManager.default.removeItem(at: dir) })
+        }
+    }
+
+    @Test("互斥:并发进入的 body 串行执行,计数不丢", arguments: Implementation.allCases)
+    func serializesConcurrentBodies(_ implementation: Implementation) throws {
+        let (fileSystem, target, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+
+        final class Counter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = 0
+            func increment() { lock.lock(); value += 1; lock.unlock() }
+            func get() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+        }
+
+        // 若锁不互斥,512 次并发自增几乎必然丢计数。
+        let counter = Counter()
+        let iterations = 64
+        let group = DispatchGroup()
+        // enter 必须在派生侧:放在线程闭包里,主线程可能赶在任何一个
+        // enter 之前 wait —— 空 group 立即返回,计数还没跑完。
+        let threads = (0..<8).map { _ in
+            group.enter()
+            return Thread {
+                defer { group.leave() }
+                for _ in 0..<iterations {
+                    try? fileSystem.withExclusiveLock(at: target) {
+                        counter.increment()
+                    }
+                }
+                // withExclusiveLock 阻塞语义下不该抛错;抛了会少计数,断言抓得到。
+            }
+        }
+        threads.forEach { $0.start() }
+        group.wait()
+
+        #expect(counter.get() == 8 * iterations, "实际计数 \(counter.get())")
+    }
+
+    @Test("锁文件是稳定旁路,不随目标被替换", arguments: Implementation.allCases)
+    func lockSurvivesTargetReplacement(_ implementation: Implementation) throws {
+        let (fileSystem, target, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+
+        // 在锁内替换目标文件(正是 ProjectStore 的事务形态),锁必须仍然有效 ——
+        // flock 建立在 inode 上,锁被 rename 的文件会让后续锁请求指向新 inode。
+        try fileSystem.write(Data("v1".utf8), to: target)
+        var reentered = false
+        try fileSystem.withExclusiveLock(at: target) {
+            let temp = target.deletingLastPathComponent()
+                .appendingPathComponent(".swap-\(UUID().uuidString)")
+            try fileSystem.write(Data("v2".utf8), to: temp)
+            try fileSystem.replaceItem(at: target, withItemAt: temp)
+            reentered = true
+        }
+        #expect(reentered)
+        #expect(try fileSystem.read(at: target) == Data("v2".utf8))
+    }
+}

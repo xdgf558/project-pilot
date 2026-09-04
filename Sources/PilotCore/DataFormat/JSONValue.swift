@@ -12,8 +12,15 @@ import Foundation
 public enum JSONValue: Sendable, Hashable {
     case null
     case bool(Bool)
-    /// 数字统一按 `Double` 存。JSON 本身不区分整数和浮点,
-    /// 强行区分会让往返变得依赖解析器的实现细节。
+    /// 整数值的数字(含超出 Double 精度的,≤ Int64 上限)。
+    /// **必须有这个 case**:未知字段原样保留是 v0.2 §3 规则 9 的要求,
+    /// 而「未来版本写进 unknownFields 的大整数」在 Double 下会丢精度,
+    /// 旧版本解码、重编码后字节变了,一份完好的新版快照会被误报损坏 ——
+    /// 「新版可读不可写」的承诺就兑现不了(P1-05 审查发现)。
+    case integer(Int64)
+    /// 非整数的数字。JSON 不区分 42 与 42.0 的类型,
+    /// 但字节表示不同:整数字面量解码为 `.integer`,带小数点/指数的解码为
+    /// `.number`,各自原样往返 —— 两者不相等是有意的。
     case number(Double)
     case string(String)
     case array([JSONValue])
@@ -27,6 +34,8 @@ extension JSONValue: Codable {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
+        } else if let value = try? container.decode(Int64.self) {
+            self = .integer(value)
         } else if let value = try? container.decode(Double.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
@@ -48,6 +57,7 @@ extension JSONValue: Codable {
         switch self {
         case .null: try container.encodeNil()
         case .bool(let value): try container.encode(value)
+        case .integer(let value): try container.encode(value)
         case .number(let value): try container.encode(value)
         case .string(let value): try container.encode(value)
         case .array(let value): try container.encode(value)

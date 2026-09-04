@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// 生产用实现:真实文件系统。
@@ -93,6 +94,22 @@ public struct SystemFileSystem: FileSystem {
         if status != 0 {
             throw Self.map(errno: errno, url: destination)
         }
+    }
+
+    public func withExclusiveLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
+        // 锁文件是稳定路径:state.json.lock 永远不被 rename,
+        // 所有进程打开的都是同一个 inode,flock 才有跨进程意义。
+        let lockPath = URL(fileURLWithPath: url.path + ".lock")
+        let fd = open(lockPath.path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else {
+            throw Self.map(errno: errno, url: lockPath)
+        }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw Self.map(errno: errno, url: lockPath)
+        }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
     }
 
     // MARK: - 错误映射

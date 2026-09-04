@@ -42,6 +42,10 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
     // 用递归锁,这样 onOperation 回调里可以再调用本对象 ——
     // 「文件被替换」场景正需要在一次操作中途改动文件系统。
     private let lock = NSRecursiveLock()
+    /// 事务锁(withExclusiveLock)。独立于数据锁:保存事务里会
+    /// 嵌套调用本实现的其他方法,若共用同一把锁,同线程重入会
+    /// 让「事务内嵌套事务」的竞态测试失去意义。
+    private let transactionLock = NSLock()
     private var nodes: [String: Node] = ["/": .directory]
     private var faults: [FaultRule] = []
     private var hook: (@Sendable (Operation, URL) -> Void)?
@@ -98,6 +102,14 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
     }
 
     // MARK: - FileSystem
+
+    public func withExclusiveLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
+        // 与真实实现同一个语义:互斥、阻塞。用独立于内部数据锁的
+        // 专用锁,两把锁各管各的层次,避免锁序问题。
+        transactionLock.lock()
+        defer { transactionLock.unlock() }
+        return try body()
+    }
 
     public func exists(at url: URL) -> Bool {
         lock.lock()

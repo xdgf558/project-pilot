@@ -971,3 +971,35 @@ payload-only 静默放过 —— 而 revision 被悄悄改小,乐观并发就被
 ### 回退条件
 
 v0.2 §3 原文对校验和范围或版本策略有明确规定时,以原文为准并更新本 ADR。
+
+### 2026-09-04 审查修订:三处
+
+第一轮审查(Request changes,1 P1 + 2 P2)。
+
+**一、校验与替换之间没有原子性(1 P1)。** save 先读盘校验、后 rename,
+窗口不锁时两个进程都能通过校验、后写者覆盖先写者 —— rename 的原子性
+只管单次替换,管不到 check-then-act 的时序。修正:FileSystem 增加
+`withExclusiveLock(at:_:)`(flock,锁在 `url + ".lock"` 稳定旁路上 ——
+锁一个会被 rename 的文件,后续锁请求会被引到新 inode 上,等于没锁),
+保存事务整体处于锁内。契约测试新增互斥与「锁内替换目标」两用例;
+ProjectStore 新增带 barrier 的并发双写测试:**恰好一个成功**,无锁实现
+在 20 轮里全部命中竞态(探针实测)。读不加锁:replace 的原子性保证
+读不到半截。
+
+**二、当前版本可以把未来 schema 写进去,然后把自己锁成只读(1 P2)。**
+保存路径只查盘上版本,不查待存 envelope。修正:envelope.schemaVersion
+必须等于 `SchemaVersion.current`,否则抛 `envelopeVersionMismatch`;
+写旧/新版格式留给将来显式的导出 / 迁移 API。
+
+**三、未来版本的未知大整数被误报损坏(1 P2)。** JSONValue 把所有数字
+存成 Double,未来版本写进 unknownFields 的 `9007199254740993`(2^53+1)
+会丢精度 → 重编码字节变了 → 完好的新版快照被报 `.corrupted`,
+「新版可读不可写」无法兑现。修正:JSONValue 增加 `.integer(Int64)` case
+(解码顺序 Bool → Int64 → Double → String),整数字面量原样往返;
+`.integer` 与 `.number` 不相等是有意的 —— JSON 的 42 与 42.0 是两种字节。
+这同时把 P1-01 已知限制 2 的精度边界从 2^53 推到 Int64 上限(2^63);
+再往上需要任意精度,那要真正的 JSON 解析器,当前不值。
+
+### 开放问题
+
+无新增。既有开放问题(解绑 reason、v0.2 §2.3 原文对照)不变。
