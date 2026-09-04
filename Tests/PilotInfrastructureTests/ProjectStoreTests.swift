@@ -289,12 +289,12 @@ struct ProjectStoreTests {
     /// 线程安全的结果盒子:每个线程只写自己的槽位,读用锁保护。
     private final class OutcomeBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var outcome: Result<Void, Error>?
-        func set(_ value: Result<Void, Error>) {
+        private var outcome: Result<Void, any Error>?
+        func set(_ value: Result<Void, any Error>) {
             lock.lock(); defer { lock.unlock() }
             outcome = value
         }
-        func get() -> Result<Void, Error>? {
+        func get() -> Result<Void, any Error>? {
             lock.lock(); defer { lock.unlock() }
             return outcome
         }
@@ -320,12 +320,17 @@ struct ProjectStoreTests {
             let boxA = OutcomeBox()
             let boxB = OutcomeBox()
 
-            func writer(_ box: OutcomeBox, _ name: String, _ count: Int) {
+            @Sendable func writer(
+                _ box: OutcomeBox,
+                _ base: DataEnvelope<Payload>,
+                _ name: String,
+                _ count: Int
+            ) {
                 startGate.wait()
                 do {
-                    try store.save(Self.bumped(a.envelope,
+                    try store.save(Self.bumped(base,
                                                payload: Payload(name: name, count: count)),
-                                   to: url, expecting: a.envelope.revision)
+                                   to: url, expecting: base.revision)
                     box.set(.success(()))
                 } catch {
                     box.set(.failure(error))
@@ -333,8 +338,8 @@ struct ProjectStoreTests {
                 doneGate.signal()
             }
 
-            let threadA = Thread { writer(boxA, "A 写入", 1) }
-            let threadB = Thread { writer(boxB, "B 写入", 2) }
+            let threadA = Thread { writer(boxA, a.envelope, "A 写入", 1) }
+            let threadB = Thread { writer(boxB, b.envelope, "B 写入", 2) }
             threadA.start(); threadB.start()
             startGate.signal(); startGate.signal()
             doneGate.wait(); doneGate.wait()

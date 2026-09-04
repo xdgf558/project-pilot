@@ -334,6 +334,8 @@ struct WithExclusiveLockContractTests {
             private let lock = NSLock()
             private var current = 0
             private var maxConcurrent = 0
+            private var executed = 0
+            private var failures = 0
             func enter() {
                 lock.lock(); current += 1
                 maxConcurrent = max(maxConcurrent, current)
@@ -342,7 +344,16 @@ struct WithExclusiveLockContractTests {
             func exit() {
                 lock.lock(); current -= 1; lock.unlock()
             }
-            func get() -> Int { lock.lock(); defer { lock.unlock() }; return maxConcurrent }
+            func recordExecuted() {
+                lock.lock(); executed += 1; lock.unlock()
+            }
+            func recordFailure() {
+                lock.lock(); failures += 1; lock.unlock()
+            }
+            func stats() -> (maxConcurrent: Int, executed: Int, failures: Int) {
+                lock.lock(); defer { lock.unlock() }
+                return (maxConcurrent, executed, failures)
+            }
         }
 
         let probe = ConcurrencyProbe()
@@ -355,11 +366,18 @@ struct WithExclusiveLockContractTests {
             return Thread {
                 defer { group.leave() }
                 for _ in 0..<iterations {
-                    try? fileSystem.withExclusiveLock(at: target) {
-                        probe.enter()
-                        // 可重叠窗口:1ms 足够让无锁实现叠出并发。
-                        Thread.sleep(forTimeInterval: 0.001)
-                        probe.exit()
+                    // 不能 try? —— 竞争时抛错被吞掉,body 少执行,
+                    // max == 1 照样成立,阻塞语义的失效就看不见了(第二轮审查)。
+                    do {
+                        try fileSystem.withExclusiveLock(at: target) {
+                            probe.enter()
+                            // 可重叠窗口:1ms 足够让无锁实现叠出并发。
+                            Thread.sleep(forTimeInterval: 0.001)
+                            probe.exit()
+                        }
+                        probe.recordExecuted()
+                    } catch {
+                        probe.recordFailure()
                     }
                 }
             }
@@ -367,7 +385,56 @@ struct WithExclusiveLockContractTests {
         threads.forEach { $0.start() }
         group.wait()
 
-        #expect(probe.get() == 1, "body 出现了 \(probe.get()) 层并发重叠 —— 锁没有互斥")
+        let stats = probe.stats()
+        #expect(stats.executed == 8 * iterations,
+                "有调用被丢弃:执行 \(stats.executed)/\(8 * iterations),失败 \(stats.failures) —— 锁在竞争时拒绝而不是等待")
+        #expect(stats.failures == 0,
+                "锁在竞争时抛错 \(stats.failures) 次 —— 阻塞语义失效(LOCK_NB?)")
+        #expect(stats.maxConcurrent == 1,
+                "body 出现了 \(stats.maxConcurrent) 层并发重叠 —— 锁没有互斥")
+    }
+
+    @Test("不同目标的锁互不阻塞", arguments: Implementation.allCases)
+    func differentTargetsDoNotBlock(_ implementation: Implementation) throws {
+        // 生产实现按目标路径各一把锁:两个不同文件的保存可以并发。
+        // 替身若整个实例一把锁,会把跨文件并发强行串行化,
+        // 掩盖 P1-12 多命令并发测试里的竞态(第二轮审查 P2)。
+        let (fileSystem, target, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+        let fileA = target
+        let fileB = target.deletingLastPathComponent().appendingPathComponent("other.json")
+
+        let holdingA = DispatchSemaphore(value: 0)
+        let enteredB = DispatchSemaphore(value: 0)
+        let releaseA = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+
+        group.enter()
+        let threadA = Thread {
+            defer { group.leave() }
+            _ = try? fileSystem.withExclusiveLock(at: fileA) {
+                holdingA.signal()                                // A 已持锁
+                _ = releaseA.wait(timeout: .distantFuture)       // 等 B 进来再放
+            }
+        }
+        threadA.start()
+        _ = holdingA.wait(timeout: .distantFuture)
+
+        group.enter()
+        let threadB = Thread {
+            defer { group.leave() }
+            _ = try? fileSystem.withExclusiveLock(at: fileB) {
+                enteredB.signal()                                // B 没被 A 挡住
+            }
+        }
+        threadB.start()
+
+        // A 持锁期间,B 必须能在时限内进入自己的锁。
+        let got = enteredB.wait(timeout: .now() + 5)
+        releaseA.signal()
+        group.wait()
+
+        #expect(got == .success, "B 被无关文件的锁阻塞了 —— 替身把所有文件串行化")
     }
 
     @Test("锁文件是稳定旁路,不随目标被替换", arguments: Implementation.allCases)
