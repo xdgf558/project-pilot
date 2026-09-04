@@ -116,6 +116,11 @@ public struct ProjectStore<Payload: Codable & Sendable>: Sendable {
         to url: URL,
         expecting expected: Revision
     ) throws {
+        // 先把父目录建出来(幂等)。旁路锁文件与目标都在这个目录里:
+        // withExclusiveLock 的 open(O_CREAT) 在目录缺失时直接 ENOENT,
+        // 走不到后面的目录创建 —— 首次运行(Application Support/ProjectPilot
+        // 尚不存在)必然挂在这里。
+        try fileSystem.createDirectory(at: url.deletingLastPathComponent())
         // 「读盘校验 → 临时写 → rename」必须整体处于跨进程锁内。
         // 校验与替换之间的窗口不锁,两个进程都能通过校验、后写者覆盖先写者 ——
         // rename 的原子性管不到 check-then-act 的时序。
@@ -214,7 +219,6 @@ public struct ProjectStore<Payload: Codable & Sendable>: Sendable {
     /// 不留垃圾;目标文件在失败路径上完好如初。
     private func writeAtomically(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
-        try fileSystem.createDirectory(at: directory)
         let temporary = directory.appendingPathComponent(
             "." + url.lastPathComponent + ".tmp-" + UUID().uuidString)
         do {

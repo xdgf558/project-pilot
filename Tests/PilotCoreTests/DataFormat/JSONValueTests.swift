@@ -7,11 +7,10 @@ struct JSONValueTests {
 
     @Test("各种标量往返")
     func scalarsRoundTrip() throws {
-        // 整数值一律用 .integer 构造:JSONEncoder 会把整数值的 Double
-        // 写成整数字面量,往返后是 .integer —— 两者不相等是设计(见下)。
         let cases: [JSONValue] = [
             .null, .bool(true), .bool(false),
-            .integer(0), .number(-1.5), .number(0.1), .integer(10_000_000_000),
+            .integer(0), .number(-1.5), .number(0.1), .number(1e10),
+            .number(42), .integer(9_007_199_254_740_993),
             .string(""), .string("中文与 emoji 🚀"),
         ]
         for value in cases {
@@ -56,12 +55,31 @@ struct JSONValueTests {
         #expect(try JSONDecoder().decode(JSONValue.self, from: data) == value)
     }
 
-    @Test("整数与小数不相等,即使数值相同")
-    func integerAndNumberAreDistinct() throws {
-        // JSON 写 42 与 42.0 是两种字节表示,往返时各自保持 ——
-        // 混同会让「字节变了」伪装成「值没变」。
-        #expect(JSONValue.integer(42) != JSONValue.number(42))
-        #expect(JSONValue.integer(-1) != JSONValue.number(-1))
+    @Test("整数值的 .number 往返后与 .integer 值相等(值语义)")
+    func numberWithIntegerValueSurvivesPersistence() throws {
+        // 上一轮曾断言两者不等 —— 那基于「42 与 42.0 字节不同」,
+        // 而本台编码器把整数值的 Double 写成整数字面量,字节根本没有差异;
+        // 不等的只有 case 标签,却会让 payload 匹配 / 事件去重 / 重放断言
+        // 被持久化的影子差异咬到(第二轮审查 P2)。改为值语义:
+        let original = JSONValue.number(42)
+        let data = try JSONEncoder().encode(original)          // 42
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: data)
+        #expect(decoded == .integer(42))                        // case 变了
+        #expect(decoded == original)                            // 但值相等
+        #expect(decoded.hashValue == original.hashValue)        // 相等 ⇒ 同哈希
+
+        // 跨 case 相等要求 Double 精确可逆 —— 两个不同的数不相等。
+        #expect(JSONValue.integer(9_007_199_254_740_993)
+                != JSONValue.number(9_007_199_254_740_992))
+        #expect(JSONValue.number(42.5) != JSONValue.integer(42))
+    }
+
+    @Test("Set 去重按值语义工作")
+    func setDeduplicatesByValue() {
+        let set: Set<JSONValue> = [.integer(42), .number(42), .number(42.0), .bool(true)]
+        // 42 的三种表示是同一个值。
+        #expect(set.count == 2)
+        #expect(set.contains(.integer(42)))
     }
 
     @Test("布尔不会被当成数字")

@@ -74,6 +74,35 @@ struct ProjectStoreTests {
         #expect(try store.load(from: url) == nil)
     }
 
+    @Test("首次保存:父目录完全不存在也能创建", arguments: Implementation.allCases)
+    func firstSaveCreatesMissingDirectories(_ implementation: Implementation) throws {
+        // 第一轮审查 P1:旁路锁的 open(O_CREAT) 先于 writeAtomically 的
+        // createDirectory 执行,父目录缺失时直接 ENOENT —— 首次运行
+        // (Application Support/ProjectPilot 尚不存在)必挂。
+        // makeSubject 会预建根目录,恰好把这个路径挡在测试之外;
+        // 这里刻意不建,连多级中间目录一起交给 save 创建。
+        let store: ProjectStore<Payload>
+        let url: URL
+        switch implementation {
+        case .inMemory:
+            store = ProjectStore(fileSystem: InMemoryFileSystem())
+            url = URL(fileURLWithPath: "/pilot-fresh-\(UUID().uuidString)/a/b/state.json")
+        case .system:
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pilot-fresh-\(UUID().uuidString)", isDirectory: true)
+            store = ProjectStore(fileSystem: SystemFileSystem())
+            url = root.appendingPathComponent("a/b/state.json")
+        }
+
+        try store.save(makeEnvelope(revision: Revision(1)), to: url, expecting: .initial)
+        let loaded = try #require(try store.load(from: url))
+        #expect(loaded.envelope.revision == Revision(1))
+
+        // 第二次保存照常(锁文件已存在,幂等)。
+        try store.save(Self.bumped(loaded.envelope), to: url, expecting: loaded.envelope.revision)
+        #expect(try #require(try store.load(from: url)).envelope.revision == Revision(2))
+    }
+
     // MARK: - 校验和
 
     @Test("篡改 payload 后读取报损坏", arguments: Implementation.allCases)

@@ -320,40 +320,54 @@ struct WithExclusiveLockContractTests {
         }
     }
 
-    @Test("互斥:并发进入的 body 串行执行,计数不丢", arguments: Implementation.allCases)
+    @Test("互斥:body 的并发重叠数最大为 1", arguments: Implementation.allCases)
     func serializesConcurrentBodies(_ implementation: Implementation) throws {
         let (fileSystem, target, cleanup) = try makeSubject(implementation)
         defer { cleanup() }
 
-        final class Counter: @unchecked Sendable {
+        // 不能用「共享计数器自增」证明互斥:计数器自己持有 NSLock,
+        // 把 withExclusiveLock 换成直接调 body,计数照样不丢 ——
+        // 断言被计数器自己的锁掩蔽了(第二轮审查 P2)。
+        // 改为观测**同时进入 body 的数量**:body 保持一段可重叠窗口,
+        // 无锁实现必然叠出并发,互斥实现必须 max == 1。
+        final class ConcurrencyProbe: @unchecked Sendable {
             private let lock = NSLock()
-            private var value = 0
-            func increment() { lock.lock(); value += 1; lock.unlock() }
-            func get() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+            private var current = 0
+            private var maxConcurrent = 0
+            func enter() {
+                lock.lock(); current += 1
+                maxConcurrent = max(maxConcurrent, current)
+                lock.unlock()
+            }
+            func exit() {
+                lock.lock(); current -= 1; lock.unlock()
+            }
+            func get() -> Int { lock.lock(); defer { lock.unlock() }; return maxConcurrent }
         }
 
-        // 若锁不互斥,512 次并发自增几乎必然丢计数。
-        let counter = Counter()
-        let iterations = 64
+        let probe = ConcurrencyProbe()
+        let iterations = 32
         let group = DispatchGroup()
         // enter 必须在派生侧:放在线程闭包里,主线程可能赶在任何一个
-        // enter 之前 wait —— 空 group 立即返回,计数还没跑完。
+        // enter 之前 wait —— 空 group 立即返回,窗口还没跑完。
         let threads = (0..<8).map { _ in
             group.enter()
             return Thread {
                 defer { group.leave() }
                 for _ in 0..<iterations {
                     try? fileSystem.withExclusiveLock(at: target) {
-                        counter.increment()
+                        probe.enter()
+                        // 可重叠窗口:1ms 足够让无锁实现叠出并发。
+                        Thread.sleep(forTimeInterval: 0.001)
+                        probe.exit()
                     }
                 }
-                // withExclusiveLock 阻塞语义下不该抛错;抛了会少计数,断言抓得到。
             }
         }
         threads.forEach { $0.start() }
         group.wait()
 
-        #expect(counter.get() == 8 * iterations, "实际计数 \(counter.get())")
+        #expect(probe.get() == 1, "body 出现了 \(probe.get()) 层并发重叠 —— 锁没有互斥")
     }
 
     @Test("锁文件是稳定旁路,不随目标被替换", arguments: Implementation.allCases)
