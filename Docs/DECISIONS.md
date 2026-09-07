@@ -1126,3 +1126,58 @@ fsync 级断电持久性仍归 P1-12。
 v0.2 原文若规定了事件文件名、append 语义、或本层必须做领域折回,
 以原文为准并更新本 ADR。
 
+---
+
+## ADR-0017:命令层是带 requestId 的写入事务,不是业务命令枚举
+
+**状态:** 已采纳
+**日期:** 2026-09-07
+**偏离:** P1-07 工作包原文与 v0.2 §5 命令清单均不在仓库内,无从对照
+**工作包:** P1-07
+
+### 背景
+
+ADR-0001 把命令层的接缝写死了:`execute(_:) async throws -> CommandReceipt`,
+command 是 Codable 值类型、带 requestId 和幂等 key;XPC 与进程内复用
+同一套 handler。P1-03 / P1-06 都把「解释事件、改领域对象」推到本层。
+
+仓库内**没有**命令清单。P1-03 已经否掉「现在设计完整 reducer / 命令集」:
+那等于把猜从一张表扩大到整个命令层。本包不能把那条否决推翻。
+
+### 决策
+
+**一、`CommandRequest` 携带已经算好的事件和下一份 payload。**
+调用方在进 `execute` 之前调用领域对象上已有的 `transition` /
+`bindPullRequest`。命令层校验 requestId、追加事件、乐观写快照。
+不在这里声明 `enum ProjectCommand { case changeStage; case bindPR; ... }`。
+
+被否掉的备选:猜一份业务命令枚举。原文不在,猜对也是同一套定义写两遍;
+猜错要连事件类型一起返工。
+
+**二、一次 `execute` 是「先事件、后快照」。**
+崩溃夹在两步之间时,快照落后于日志 —— `pendingEvents()` 就是给这个
+现场用的。反过来写会让快照超前,重放直接 `cursorAheadOfLog`。
+
+不套第三把事务锁。`EventLog` / `ProjectStore` 各自的锁加上乐观校验,
+已经让并发双写恰好一个成功;夹在两步之间的现场由游标恢复。
+探针实测拿掉外层锁,并发测试仍然绿 —— 留一把测不红的锁是假安全。
+
+**三、幂等只占位。** `idempotencyKey` 在请求上,重复到达不产生第二条
+事件是 P6-02。本层重复执行同一 requestId 会按普通乐观并发处理。
+
+**四、存储层错误原样透传。** `CommandError` 只覆盖入口校验
+(空 requestId / 空事件 / 事件 requestId 不一致)。游标冲突、损坏、
+磁盘故障分别是 `EventLogError` / `ProjectStoreError` / `FileSystemError`。
+
+### 代价
+
+- 业务命令的名字、参数、哪些必须带 reason,要等各自入口真正出现
+  (迁移 / 恢复 / 合并仍按 P1-03 的约定随命令落地)。
+- 调用方必须自己把 `transition` 的结果编成 Event。漏编只能靠
+  `emptyEvents` 拦住,拦不住「编了但编错」。
+
+### 回退条件
+
+v0.2 §5 原文给出命令清单时,以原文为准,在本层之上加业务命令枚举,
+`execute` 的事务形状不用改。
+
