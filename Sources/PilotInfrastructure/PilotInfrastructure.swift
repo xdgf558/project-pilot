@@ -4,7 +4,8 @@ import PilotCore
 ///
 /// ## 职责
 ///
-/// 这里已经放了:`ProjectStore`(JSON 快照)、`EventLog`(NDJSON 事件日志)。
+/// 这里已经放了:`ProjectStore`(JSON 快照)、`EventLog`(NDJSON 事件日志)、
+/// `ProjectRepository`(进程内命令入口)。
 /// 将来还会放:`SafeProcessRunner`、`CommandResolver`、`GitAdapter`、
 /// `GitHubAdapter` 以及各执行器适配器。
 ///
