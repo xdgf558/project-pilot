@@ -19,7 +19,10 @@ esac
 PREFIX="test-results-$CONFIGURATION"
 rm -f "$PREFIX"*.xml
 
-swift test -c "$CONFIGURATION" --xunit-output "$PREFIX.xml" 2>&1 | tee "test-$CONFIGURATION.log"
+# 测试目标同样零警告。规则写的是「全部 target 构建必须零警告」,
+# 但 swift build 不编译测试目标,swift test 又从没带过这个参数 ——
+# 测试代码的警告在 CI 上从来就不可见,直到并发测试攒了一堆(第二轮审查)。
+swift test -c "$CONFIGURATION" -Xswiftc -warnings-as-errors --xunit-output "$PREFIX.xml" 2>&1 | tee "test-$CONFIGURATION.log"
 status=${PIPESTATUS[0]}
 
 # SwiftPM 不把 Swift Testing 的结果写进你指定的文件名,而是写到

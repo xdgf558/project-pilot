@@ -21,7 +21,7 @@ struct EventTests {
             payload: .object([
                 "from": .string("blocked"),
                 "to": .string("ready"),
-                "dependencyCount": .number(2),
+                "dependencyCount": .integer(2),
             ])
         )
     }
@@ -49,7 +49,7 @@ struct EventTests {
             id: event.id, sequence: event.sequence, timestamp: event.timestamp,
             projectId: event.projectId, entityType: event.entityType,
             entityId: event.entityId, eventType: event.eventType, actor: event.actor,
-            payload: .array([.number(1), .string("两"), .null,
+            payload: .array([.integer(1), .string("两"), .null,
                              .object(["嵌套": .bool(true)])])
         )
         let data = try CanonicalJSON.makeEventEncoder().encode(event)

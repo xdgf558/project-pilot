@@ -46,6 +46,23 @@ public protocol FileSystem: Sendable {
     ///
     /// **契约限定为文件。** source 或 destination 是目录时抛 `.isDirectory`。
     ///
+    /// 在与 `url` 关联的**跨进程**排他锁下执行 `body`。
+    ///
+    /// ProjectStore 用它把「读盘校验 → 临时写 → rename」包成一个事务:
+    /// check-then-act 的窗口必须被锁住,否则两个进程都能通过校验、
+    /// 后写的覆盖先写的 —— rename 的原子性只保证单次替换没有半成品,
+    /// 保证不了「确认 r1 之后 r1 还是 r1」。
+    ///
+    /// 锁落在稳定路径上(`url` + ".lock"),**从不被 rename** ——
+    /// flock 建立在 inode 上,锁一个会被替换的文件,
+    /// 后续的锁请求会被引到新 inode 上去,等于没锁。
+    /// 进程崩溃时内核自动释放,不存在陈旧锁。
+    ///
+    /// 阻塞语义:拿不到就等。乐观并发的冲突由 body 内部的 revision
+    /// 校验负责,不该由锁把合法的顺序写入变成错误。
+    /// 读操作不需要加锁 —— replace 的原子性保证读不到半截文件。
+    func withExclusiveLock<T>(at url: URL, _ body: () throws -> T) throws -> T
+
     /// 这是刻意收窄的。目录 rename 的 POSIX 语义有一串交叉规则 ——
     /// 目标是非空目录报 `ENOTEMPTY`、目录覆盖到文件报 `ENOTDIR`、
     /// 反向报 `EISDIR` —— 在内存实现里把这些全补齐,是为一个当前没人需要的能力

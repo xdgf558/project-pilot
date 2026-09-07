@@ -289,3 +289,171 @@ struct FileSystemContractTests {
         #expect(try fs.read(at: source) == Data("new".utf8))
     }
 }
+
+
+/// withExclusiveLock 的契约用例(独立 Suite,避免塞进已经很长的主套件)。
+@Suite("withExclusiveLock 契约")
+struct WithExclusiveLockContractTests {
+
+    enum Implementation: String, CaseIterable, Sendable {
+        case inMemory
+        case system
+    }
+
+    private func makeSubject(_ implementation: Implementation) throws
+        -> (fileSystem: any FileSystem, target: URL, cleanup: @Sendable () -> Void)
+    {
+        switch implementation {
+        case .inMemory:
+            let fileSystem = InMemoryFileSystem()
+            let dir = URL(fileURLWithPath: "/pilot-test-\(UUID().uuidString)")
+            try fileSystem.createDirectory(at: dir)   // 锁文件与目标都需要父目录
+            let target = dir.appendingPathComponent("state.json")
+            return (fileSystem, target, {})
+        case .system:
+            let fileSystem = SystemFileSystem()
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pilot-lock-\(UUID().uuidString)", isDirectory: true)
+            try fileSystem.createDirectory(at: dir)
+            let target = dir.appendingPathComponent("state.json")
+            return (fileSystem, target, { try? FileManager.default.removeItem(at: dir) })
+        }
+    }
+
+    @Test("互斥:body 的并发重叠数最大为 1", arguments: Implementation.allCases)
+    func serializesConcurrentBodies(_ implementation: Implementation) throws {
+        let (fileSystem, target, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+
+        // 不能用「共享计数器自增」证明互斥:计数器自己持有 NSLock,
+        // 把 withExclusiveLock 换成直接调 body,计数照样不丢 ——
+        // 断言被计数器自己的锁掩蔽了(第二轮审查 P2)。
+        // 改为观测**同时进入 body 的数量**:body 保持一段可重叠窗口,
+        // 无锁实现必然叠出并发,互斥实现必须 max == 1。
+        final class ConcurrencyProbe: @unchecked Sendable {
+            private let lock = NSLock()
+            private var current = 0
+            private var maxConcurrent = 0
+            private var executed = 0
+            private var failures = 0
+            func enter() {
+                lock.lock(); current += 1
+                maxConcurrent = max(maxConcurrent, current)
+                lock.unlock()
+            }
+            func exit() {
+                lock.lock(); current -= 1; lock.unlock()
+            }
+            func recordExecuted() {
+                lock.lock(); executed += 1; lock.unlock()
+            }
+            func recordFailure() {
+                lock.lock(); failures += 1; lock.unlock()
+            }
+            func stats() -> (maxConcurrent: Int, executed: Int, failures: Int) {
+                lock.lock(); defer { lock.unlock() }
+                return (maxConcurrent, executed, failures)
+            }
+        }
+
+        let probe = ConcurrencyProbe()
+        let iterations = 32
+        let group = DispatchGroup()
+        // enter 必须在派生侧:放在线程闭包里,主线程可能赶在任何一个
+        // enter 之前 wait —— 空 group 立即返回,窗口还没跑完。
+        let threads = (0..<8).map { _ in
+            group.enter()
+            return Thread {
+                defer { group.leave() }
+                for _ in 0..<iterations {
+                    // 不能 try? —— 竞争时抛错被吞掉,body 少执行,
+                    // max == 1 照样成立,阻塞语义的失效就看不见了(第二轮审查)。
+                    do {
+                        try fileSystem.withExclusiveLock(at: target) {
+                            probe.enter()
+                            // 可重叠窗口:1ms 足够让无锁实现叠出并发。
+                            Thread.sleep(forTimeInterval: 0.001)
+                            probe.exit()
+                        }
+                        probe.recordExecuted()
+                    } catch {
+                        probe.recordFailure()
+                    }
+                }
+            }
+        }
+        threads.forEach { $0.start() }
+        group.wait()
+
+        let stats = probe.stats()
+        #expect(stats.executed == 8 * iterations,
+                "有调用被丢弃:执行 \(stats.executed)/\(8 * iterations),失败 \(stats.failures) —— 锁在竞争时拒绝而不是等待")
+        #expect(stats.failures == 0,
+                "锁在竞争时抛错 \(stats.failures) 次 —— 阻塞语义失效(LOCK_NB?)")
+        #expect(stats.maxConcurrent == 1,
+                "body 出现了 \(stats.maxConcurrent) 层并发重叠 —— 锁没有互斥")
+    }
+
+    @Test("不同目标的锁互不阻塞", arguments: Implementation.allCases)
+    func differentTargetsDoNotBlock(_ implementation: Implementation) throws {
+        // 生产实现按目标路径各一把锁:两个不同文件的保存可以并发。
+        // 替身若整个实例一把锁,会把跨文件并发强行串行化,
+        // 掩盖 P1-12 多命令并发测试里的竞态(第二轮审查 P2)。
+        let (fileSystem, target, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+        let fileA = target
+        let fileB = target.deletingLastPathComponent().appendingPathComponent("other.json")
+
+        let holdingA = DispatchSemaphore(value: 0)
+        let enteredB = DispatchSemaphore(value: 0)
+        let releaseA = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+
+        group.enter()
+        let threadA = Thread {
+            defer { group.leave() }
+            _ = try? fileSystem.withExclusiveLock(at: fileA) {
+                holdingA.signal()                                // A 已持锁
+                _ = releaseA.wait(timeout: .distantFuture)       // 等 B 进来再放
+            }
+        }
+        threadA.start()
+        _ = holdingA.wait(timeout: .distantFuture)
+
+        group.enter()
+        let threadB = Thread {
+            defer { group.leave() }
+            _ = try? fileSystem.withExclusiveLock(at: fileB) {
+                enteredB.signal()                                // B 没被 A 挡住
+            }
+        }
+        threadB.start()
+
+        // A 持锁期间,B 必须能在时限内进入自己的锁。
+        let got = enteredB.wait(timeout: .now() + 5)
+        releaseA.signal()
+        group.wait()
+
+        #expect(got == .success, "B 被无关文件的锁阻塞了 —— 替身把所有文件串行化")
+    }
+
+    @Test("锁文件是稳定旁路,不随目标被替换", arguments: Implementation.allCases)
+    func lockSurvivesTargetReplacement(_ implementation: Implementation) throws {
+        let (fileSystem, target, cleanup) = try makeSubject(implementation)
+        defer { cleanup() }
+
+        // 在锁内替换目标文件(正是 ProjectStore 的事务形态),锁必须仍然有效 ——
+        // flock 建立在 inode 上,锁被 rename 的文件会让后续锁请求指向新 inode。
+        try fileSystem.write(Data("v1".utf8), to: target)
+        var reentered = false
+        try fileSystem.withExclusiveLock(at: target) {
+            let temp = target.deletingLastPathComponent()
+                .appendingPathComponent(".swap-\(UUID().uuidString)")
+            try fileSystem.write(Data("v2".utf8), to: temp)
+            try fileSystem.replaceItem(at: target, withItemAt: temp)
+            reentered = true
+        }
+        #expect(reentered)
+        #expect(try fileSystem.read(at: target) == Data("v2".utf8))
+    }
+}
